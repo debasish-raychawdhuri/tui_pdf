@@ -17,8 +17,9 @@ pub fn flatten_outlines(outlines: &[mupdf::Outline]) -> Vec<TocEntry> {
     let mut entries = Vec::new();
     fn walk(outlines: &[mupdf::Outline], depth: usize, entries: &mut Vec<TocEntry>) {
         for outline in outlines {
+            let title = outline.title.replace('\r', " ").replace('\n', " ");
             entries.push(TocEntry {
-                title: outline.title.clone(),
+                title,
                 page: outline.page,
                 depth,
             });
@@ -90,6 +91,9 @@ impl StatefulWidget for TocWidget {
     type State = TocState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        // Inner width: area minus border (1 col for RIGHT border)
+        let inner_width = area.width.saturating_sub(2) as usize;
+
         let items: Vec<ListItem> = state
             .entries
             .iter()
@@ -102,16 +106,23 @@ impl StatefulWidget for TocWidget {
                     .unwrap_or_default();
                 let text = format!("{}{}{}", indent, entry.title, page_str);
 
+                // Pad to fill the full row so Kitty image placeholders can't show through
+                let padded = if text.len() < inner_width {
+                    format!("{:<width$}", text, width = inner_width)
+                } else {
+                    text
+                };
+
                 let style = if state.list_state.selected() == Some(i) {
                     Style::default()
                         .fg(Color::Black)
                         .bg(Color::White)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    Style::default().fg(Color::White)
+                    Style::default().fg(Color::White).bg(Color::DarkGray)
                 };
 
-                ListItem::new(Line::from(vec![Span::styled(text, style)]))
+                ListItem::new(Line::from(vec![Span::styled(padded, style)]))
             })
             .collect();
 
