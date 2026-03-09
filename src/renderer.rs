@@ -8,7 +8,7 @@ use crate::document::Document;
 use crate::error::Result;
 
 /// Maximum total bytes for the stripe PNG cache (1 GB).
-const MAX_CACHE_BYTES: usize = 1_073_741_824;
+const MAX_CACHE_BYTES: usize = 100 * 1024 * 1024;
 
 /// PDF points are 1/72 inch. Scale to this DPI for rendering.
 pub const DEFAULT_DPI: f32 = 192.0;
