@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use image::{DynamicImage, RgbImage};
+use image::{DynamicImage, Rgb, RgbImage};
 use mupdf::Matrix;
 
 use crate::document::Document;
@@ -8,7 +8,7 @@ use crate::error::Result;
 
 const MAX_CACHE_ENTRIES: usize = 10;
 /// PDF points are 1/72 inch. Scale to this DPI for rendering.
-const DEFAULT_DPI: f32 = 192.0;
+pub const DEFAULT_DPI: f32 = 192.0;
 
 pub fn render_page(document: &Document, page_index: usize, target_width: u32) -> Result<DynamicImage> {
     let page = document.page(page_index)?;
@@ -64,6 +64,48 @@ fn pixmap_to_image(page: &mupdf::Page, matrix: &Matrix) -> Result<DynamicImage> 
         .expect("pixmap dimensions should match sample buffer");
 
     Ok(DynamicImage::ImageRgb8(img))
+}
+
+/// A rectangle to highlight on the image, in PDF point coordinates.
+pub struct HighlightRect {
+    pub x0: f32,
+    pub y0: f32,
+    pub x1: f32,
+    pub y1: f32,
+    pub color: [u8; 3],
+    pub alpha: f32, // 0.0 = transparent, 1.0 = opaque
+}
+
+/// Draw semi-transparent highlight rectangles onto a copy of the image.
+/// Coordinates are in PDF points, scaled by zoom.
+pub fn overlay_highlights(img: &DynamicImage, zoom: f32, highlights: &[HighlightRect]) -> DynamicImage {
+    let mut rgb = img.to_rgb8();
+    let scale = (DEFAULT_DPI / 72.0) * zoom;
+    let (w, h) = (rgb.width(), rgb.height());
+
+    for hl in highlights {
+        let px0 = ((hl.x0 * scale) as u32).min(w);
+        let py0 = ((hl.y0 * scale) as u32).min(h);
+        let px1 = ((hl.x1 * scale) as u32).min(w);
+        let py1 = ((hl.y1 * scale) as u32).min(h);
+
+        let a = hl.alpha;
+        let inv_a = 1.0 - a;
+
+        for y in py0..py1 {
+            for x in px0..px1 {
+                let pixel = rgb.get_pixel(x, y);
+                let blended = Rgb([
+                    (pixel[0] as f32 * inv_a + hl.color[0] as f32 * a) as u8,
+                    (pixel[1] as f32 * inv_a + hl.color[1] as f32 * a) as u8,
+                    (pixel[2] as f32 * inv_a + hl.color[2] as f32 * a) as u8,
+                ]);
+                rgb.put_pixel(x, y, blended);
+            }
+        }
+    }
+
+    DynamicImage::ImageRgb8(rgb)
 }
 
 pub struct PageCache {

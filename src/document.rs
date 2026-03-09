@@ -49,4 +49,9 @@ impl Document {
     pub fn outlines(&self) -> Result<Vec<mupdf::Outline>> {
         Ok(self.inner.outlines()?)
     }
+
+    pub fn page_links(&self, index: usize) -> Result<Vec<mupdf::Link>> {
+        let page = self.page(index)?;
+        Ok(page.links()?.collect())
+    }
 }

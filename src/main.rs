@@ -12,7 +12,7 @@ use ratatui::widgets::StatefulWidget;
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
-use tui_pdf::{Document, PdfViewState, PdfWidget, StatusBar, TocState, TocWidget};
+use tui_pdf::{Document, LinkState, PdfViewState, PdfWidget, StatusBar, TocState, TocWidget};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -35,6 +35,7 @@ fn main() -> io::Result<()> {
 
     let outlines = document.outlines().unwrap_or_default();
     let mut toc_state = TocState::new(&outlines);
+    let mut link_state = LinkState::new();
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -42,7 +43,13 @@ fn main() -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(&mut terminal, &document, &mut pdf_state, &mut toc_state);
+    let result = run_app(
+        &mut terminal,
+        &document,
+        &mut pdf_state,
+        &mut toc_state,
+        &mut link_state,
+    );
 
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
@@ -60,6 +67,7 @@ fn run_app(
     document: &Document,
     pdf_state: &mut PdfViewState,
     toc_state: &mut TocState,
+    link_state: &mut LinkState,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| {
@@ -78,24 +86,28 @@ fn run_app(
 
                 TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
 
-                if let Err(e) = pdf_state.update_image(document) {
-                    let msg =
-                        ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                if let Err(e) = pdf_state.update_image(document, Some(link_state)) {
+                    let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, cols[1]);
                 } else {
                     frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
                 }
             } else {
-                if let Err(e) = pdf_state.update_image(document) {
-                    let msg =
-                        ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                if let Err(e) = pdf_state.update_image(document, Some(link_state)) {
+                    let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, main_area);
                 } else {
                     frame.render_stateful_widget(PdfWidget, main_area, pdf_state);
                 }
             }
 
-            frame.render_widget(StatusBar { state: &*pdf_state }, status_area);
+            frame.render_widget(
+                StatusBar {
+                    state: &*pdf_state,
+                    link_state: Some(&*link_state),
+                },
+                status_area,
+            );
         })?;
 
         if event::poll(Duration::from_millis(100))? {
@@ -105,7 +117,6 @@ fn run_app(
                 }
 
                 if toc_state.visible {
-                    // TOC panel is focused
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => {
                             toc_state.visible = false;
@@ -121,13 +132,36 @@ fn run_app(
                         }
                         _ => {}
                     }
+                } else if link_state.active {
+                    match key.code {
+                        KeyCode::Esc => link_state.deactivate(),
+                        KeyCode::Char('j') | KeyCode::Down => link_state.next(),
+                        KeyCode::Char('k') | KeyCode::Up => link_state.prev(),
+                        KeyCode::Enter => {
+                            if let Some(link) = link_state.selected_link().cloned() {
+                                link_state.push_position(pdf_state.global_scroll);
+                                pdf_state.go_to_page(link.target_page);
+                                link_state.deactivate();
+                                link_state.page = usize::MAX;
+                            }
+                        }
+                        _ => {}
+                    }
                 } else {
-                    // PDF view is focused
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
                         KeyCode::Char('t') => {
                             if toc_state.has_entries() {
                                 toc_state.toggle();
+                            }
+                        }
+                        KeyCode::Char('l') => {
+                            let page = pdf_state.current_page();
+                            let _ = link_state.activate(document, page);
+                        }
+                        KeyCode::Char('b') => {
+                            if let Some(pos) = link_state.pop_position() {
+                                pdf_state.global_scroll = pos.global_scroll;
                             }
                         }
                         KeyCode::Char('n') | KeyCode::Right | KeyCode::PageDown => {

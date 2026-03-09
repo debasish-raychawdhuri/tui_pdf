@@ -11,7 +11,11 @@ use ratatui_image::StatefulImage;
 
 use crate::document::Document;
 use crate::error::Result;
-use crate::renderer::{compute_stripe_count, render_page_dpi, split_into_stripes, PageCache};
+use crate::links::LinkState;
+use crate::renderer::{
+    compute_stripe_count, overlay_highlights, render_page_dpi, split_into_stripes, HighlightRect,
+    PageCache,
+};
 
 pub struct PdfViewState {
     pub global_scroll: usize,
@@ -30,6 +34,8 @@ pub struct PdfViewState {
     cache: PageCache,
     dirty: bool,
     last_key: u32,
+    // Track link overlay state to know when to rebuild stripes
+    last_link_overlay: Option<(usize, usize)>, // (page, selected_link)
 }
 
 impl PdfViewState {
@@ -46,6 +52,7 @@ impl PdfViewState {
             cache: PageCache::new(),
             dirty: true,
             last_key: 0,
+            last_link_overlay: None,
         }
     }
 
@@ -89,7 +96,8 @@ impl PdfViewState {
     }
 
     pub fn scroll_down(&mut self, rows: usize) {
-        self.global_scroll = (self.global_scroll + rows).min(self.total_stripes.saturating_sub(1));
+        self.global_scroll =
+            (self.global_scroll + rows).min(self.total_stripes.saturating_sub(1));
     }
 
     pub fn scroll_up(&mut self, rows: usize) {
@@ -126,7 +134,11 @@ impl PdfViewState {
         Ok(())
     }
 
-    pub fn update_image(&mut self, document: &Document) -> Result<()> {
+    pub fn update_image(
+        &mut self,
+        document: &Document,
+        link_state: Option<&LinkState>,
+    ) -> Result<()> {
         let cache_key = (self.zoom * 100.0) as u32;
 
         if self.dirty || self.last_key != cache_key {
@@ -134,6 +146,30 @@ impl PdfViewState {
             self.dirty = false;
             self.last_key = cache_key;
             self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
+            self.last_link_overlay = None;
+        }
+
+        // Determine current link overlay state
+        let link_overlay = link_state.and_then(|ls| {
+            if ls.active {
+                Some((ls.page, ls.selected))
+            } else {
+                None
+            }
+        });
+
+        // If link overlay changed, rebuild stripes for the affected page
+        let link_changed = link_overlay != self.last_link_overlay;
+        if link_changed {
+            // Remove the old overlay page's stripes so they get rebuilt
+            if let Some((old_page, _)) = self.last_link_overlay {
+                self.rendered_pages.remove(&old_page);
+            }
+            // Remove the new overlay page's stripes too
+            if let Some((new_page, _)) = link_overlay {
+                self.rendered_pages.remove(&new_page);
+            }
+            self.last_link_overlay = link_overlay;
         }
 
         let current = self.current_page();
@@ -150,6 +186,7 @@ impl PdfViewState {
             if self.rendered_pages.contains_key(&page_idx) {
                 continue;
             }
+
             let img = if let Some(cached) = self.cache.get(page_idx, cache_key) {
                 cached.clone()
             } else {
@@ -157,6 +194,38 @@ impl PdfViewState {
                 self.cache.insert(page_idx, cache_key, rendered.clone());
                 rendered
             };
+
+            // If this page has link highlights, composite them onto the image
+            let img = if let (Some(ls), Some((lp, sel))) = (link_state, link_overlay) {
+                if page_idx == lp {
+                    let highlights: Vec<HighlightRect> = ls
+                        .links
+                        .iter()
+                        .enumerate()
+                        .map(|(i, link)| {
+                            let is_selected = i == sel;
+                            HighlightRect {
+                                x0: link.x0,
+                                y0: link.y0,
+                                x1: link.x1,
+                                y1: link.y1,
+                                color: if is_selected {
+                                    [255, 220, 50]
+                                } else {
+                                    [100, 140, 255]
+                                },
+                                alpha: if is_selected { 0.45 } else { 0.3 },
+                            }
+                        })
+                        .collect();
+                    overlay_highlights(&img, self.zoom, &highlights)
+                } else {
+                    img
+                }
+            } else {
+                img
+            };
+
             let stripe_images = split_into_stripes(&img, font_height);
             let protocols: Vec<StatefulProtocol> = stripe_images
                 .into_iter()
@@ -187,7 +256,6 @@ impl StatefulWidget for PdfWidget {
         let mut g = global_start;
 
         while g < global_end {
-            // Find which page this global stripe belongs to
             let page_idx = match state.cumulative_stripes.binary_search(&g) {
                 Ok(i) => i,
                 Err(i) => i.saturating_sub(1),
@@ -229,24 +297,47 @@ impl StatefulWidget for PdfWidget {
 
 pub struct StatusBar<'a> {
     pub state: &'a PdfViewState,
+    pub link_state: Option<&'a LinkState>,
 }
 
 impl<'a> Widget for StatusBar<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let page_info = format!(
-            " Page {}/{} | Zoom: {:.0}% | j/k: scroll | n/p: page | +/-: zoom | t: contents | q: quit ",
-            self.state.current_page() + 1,
-            self.state.page_count(),
-            self.state.zoom * 100.0,
-        );
+        let is_link_mode = self.link_state.map_or(false, |ls| ls.active);
+        let has_back = self
+            .link_state
+            .map_or(false, |ls| !ls.back_stack.is_empty());
 
-        let line = Line::from(vec![Span::styled(
-            page_info,
-            Style::default().fg(Color::White).bg(Color::DarkGray),
-        )]);
+        let page_info = if is_link_mode {
+            format!(
+                " LINK MODE | Page {}/{} | j/k: select link | Enter: follow | Esc: cancel ",
+                self.state.current_page() + 1,
+                self.state.page_count(),
+            )
+        } else {
+            let back_hint = if has_back { " | b: back" } else { "" };
+            format!(
+                " Page {}/{} | Zoom: {:.0}% | j/k: scroll | n/p: page | +/-: zoom | l: links | t: toc{} | q: quit ",
+                self.state.current_page() + 1,
+                self.state.page_count(),
+                self.state.zoom * 100.0,
+                back_hint,
+            )
+        };
+
+        let style = if is_link_mode {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::White).bg(Color::DarkGray)
+        };
+
+        let line = Line::from(vec![Span::styled(page_info, style)]);
 
         Paragraph::new(line)
-            .style(Style::default().bg(Color::DarkGray))
+            .style(if is_link_mode {
+                Style::default().bg(Color::Yellow)
+            } else {
+                Style::default().bg(Color::DarkGray)
+            })
             .render(area, buf);
     }
 }
