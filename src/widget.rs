@@ -154,6 +154,44 @@ impl PdfViewState {
         self.page_count
     }
 
+    /// Reset state after the document has been reloaded (e.g. file changed on disk).
+    pub fn on_reload(&mut self, document: &Document) {
+        self.page_count = document.page_count();
+        let _ = self.recompute_geometry(document);
+        self.rendered_pages.clear();
+        self.cache = StripeCache::new();
+        self.dirty_highlight_stripes.clear();
+        self.prerender_queue.clear();
+        self.prerender_pos = 0;
+        self.last_link_overlay = None;
+        self.last_search_overlay = None;
+        self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
+    }
+
+    /// Returns (page_0indexed, pdf_y_points) for the current scroll position.
+    pub fn current_pdf_position(&self) -> (usize, f32) {
+        let page = self.current_page();
+        if page >= self.cumulative_stripes.len() {
+            return (0, 0.0);
+        }
+        let page_base = self.cumulative_stripes[page];
+        let local_stripe = self.global_scroll.saturating_sub(page_base);
+        let font_height = self.picker.font_size().1 as f32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+        let pdf_y = (local_stripe as f32 * font_height) / scale;
+        (page, pdf_y)
+    }
+
+    /// Returns the page width in PDF points for the given page.
+    pub fn page_width_points(&self, page: usize) -> f32 {
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+        self.page_pixel_widths
+            .get(page)
+            .copied()
+            .unwrap_or(0) as f32
+            / scale
+    }
+
     fn recompute_geometry(&mut self, document: &Document) -> Result<()> {
         let font_height = self.picker.font_size().1 as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
@@ -646,7 +684,7 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}% | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | l: links | t: toc{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}% | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | l: links | t: toc | s: synctex{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,

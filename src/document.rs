@@ -1,10 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{Result, TuiPdfError};
 
 pub struct Document {
     inner: mupdf::Document,
     page_count: usize,
+    path: PathBuf,
+    password: Option<String>,
 }
 
 impl Document {
@@ -15,6 +17,8 @@ impl Document {
         Ok(Self {
             inner,
             page_count: page_count as usize,
+            path: path.to_path_buf(),
+            password: None,
         })
     }
 
@@ -26,7 +30,25 @@ impl Document {
         Ok(Self {
             inner,
             page_count: page_count as usize,
+            path: path.to_path_buf(),
+            password: Some(password.to_string()),
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn reload(&mut self) -> Result<()> {
+        let path_str = self.path.to_str().unwrap_or_default();
+        let mut inner = mupdf::Document::open(path_str)?;
+        if let Some(ref pw) = self.password {
+            inner.authenticate(pw)?;
+        }
+        let page_count = inner.page_count()? as usize;
+        self.inner = inner;
+        self.page_count = page_count;
+        Ok(())
     }
 
     pub fn page_count(&self) -> usize {

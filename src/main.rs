@@ -1,5 +1,6 @@
+use std::fs;
 use std::io::{self, stdout};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
 use crossterm::terminal::{
@@ -14,7 +15,10 @@ use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
-use tui_pdf::{Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget};
+use tui_pdf::{
+    Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
+    synctex_edit, jump_to_neovim,
+};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -25,7 +29,7 @@ fn main() -> io::Result<()> {
 
     let pdf_path = &args[1];
 
-    let document = Document::open(pdf_path).unwrap_or_else(|e| {
+    let mut document = Document::open(pdf_path).unwrap_or_else(|e| {
         eprintln!("Failed to open PDF: {e}");
         std::process::exit(1);
     });
@@ -56,7 +60,7 @@ fn main() -> io::Result<()> {
 
     let result = run_app(
         &mut terminal,
-        &document,
+        &mut document,
         &mut pdf_state,
         &mut toc_state,
         &mut link_state,
@@ -78,7 +82,7 @@ fn main() -> io::Result<()> {
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    document: &Document,
+    document: &mut Document,
     pdf_state: &mut PdfViewState,
     toc_state: &mut TocState,
     link_state: &mut LinkState,
@@ -86,6 +90,15 @@ fn run_app(
     goto_input: &mut Option<String>,
     search_input: &mut Option<String>,
 ) -> io::Result<()> {
+    // Auto-reload state
+    let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
+        .and_then(|m| m.modified())
+        .ok();
+    let mut last_mtime_check = Instant::now();
+
+    // Status message (shown temporarily, expires after 3s)
+    let mut status_message: Option<(String, Instant)> = None;
+
     loop {
         // Progress incremental search
         if search_state.searching {
@@ -96,6 +109,13 @@ fn run_app(
                 if let Some(hit) = search_state.current_hit() {
                     pdf_state.scroll_to_point(hit.page, hit.y0);
                 }
+            }
+        }
+
+        // Expire status message after 3 seconds
+        if let Some((_, created)) = &status_message {
+            if created.elapsed() > Duration::from_secs(3) {
+                status_message = None;
             }
         }
 
@@ -137,8 +157,16 @@ fn run_app(
                 }
             }
 
-            // Status bar
-            if let Some(input) = search_input.as_ref() {
+            // Status bar: status_message > search_input > goto_input > normal
+            if let Some((ref msg, _)) = status_message {
+                let line = Line::from(vec![Span::styled(
+                    format!(" {} ", msg),
+                    Style::default().fg(Color::White).bg(Color::Magenta),
+                )]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(Color::Magenta))
+                    .render(status_area, frame.buffer_mut());
+            } else if let Some(input) = search_input.as_ref() {
                 let prompt = format!(" /{}█ ", input);
                 let line = Line::from(vec![Span::styled(
                     prompt,
@@ -306,6 +334,26 @@ fn run_app(
                                 pdf_state.global_scroll = pos.global_scroll;
                             }
                         }
+                        KeyCode::Char('s') => {
+                            let (page, pdf_y) = pdf_state.current_pdf_position();
+                            let pdf_x = pdf_state.page_width_points(page) / 2.0;
+                            match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
+                                Some(result) => {
+                                    if !jump_to_neovim(&result.file, result.line) {
+                                        status_message = Some((
+                                            format!("SyncTeX: {}:{}", result.file, result.line),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    status_message = Some((
+                                        "SyncTeX: no result".to_string(),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
                         KeyCode::Char('n') => {
                             if search_state.active {
                                 search_state.next_hit();
@@ -341,7 +389,33 @@ fn run_app(
                 }
             }
         } else {
-            // Idle: no user input, pre-render pages until input arrives or done
+            // Idle: check for file changes (~1s interval) and pre-render
+            if last_mtime_check.elapsed() >= Duration::from_secs(1) {
+                last_mtime_check = Instant::now();
+                if let Ok(meta) = fs::metadata(document.path()) {
+                    if let Ok(mtime) = meta.modified() {
+                        if last_mtime.map_or(true, |prev| mtime != prev) {
+                            last_mtime = Some(mtime);
+                            if document.reload().is_ok() {
+                                pdf_state.on_reload(document);
+                                let _ = pdf_state.initial_render(document);
+                                // Clear search and link state
+                                search_state.clear();
+                                link_state.deactivate();
+                                link_state.page = usize::MAX;
+                                // Rebuild TOC
+                                let outlines = document.outlines().unwrap_or_default();
+                                *toc_state = TocState::new(&outlines);
+                                status_message = Some((
+                                    "File reloaded".to_string(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+
             if !pdf_state.prerender_done() {
                 while pdf_state.prerender_tick(document) {
                     if event::poll(Duration::from_millis(0))? {
