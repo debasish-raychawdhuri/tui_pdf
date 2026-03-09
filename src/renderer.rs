@@ -6,7 +6,7 @@ use mupdf::Matrix;
 use crate::document::Document;
 use crate::error::Result;
 
-const MAX_CACHE_ENTRIES: usize = 10;
+const MAX_CACHE_ENTRIES: usize = 30;
 /// PDF points are 1/72 inch. Scale to this DPI for rendering.
 pub const DEFAULT_DPI: f32 = 192.0;
 

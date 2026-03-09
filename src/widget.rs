@@ -202,8 +202,28 @@ impl PdfViewState {
 
         let search_changed = search_overlay != self.last_search_overlay;
         if search_changed {
-            // Invalidate all rendered pages since search highlights can span multiple pages
-            self.rendered_pages.clear();
+            match (&self.last_search_overlay, &search_overlay) {
+                // Query changed or search toggled: invalidate all pages with hits
+                (None, Some(_)) | (Some(_), None) => {
+                    self.rendered_pages.clear();
+                }
+                (Some((old_q, old_idx)), Some((new_q, new_idx))) => {
+                    if old_q != new_q {
+                        // Different query: full invalidation
+                        self.rendered_pages.clear();
+                    } else if let Some(ss) = search_state {
+                        // Same query, just moved the current highlight index.
+                        // Only invalidate pages that held the old or new current hit.
+                        if let Some(old_hit) = ss.hits.get(*old_idx) {
+                            self.rendered_pages.remove(&old_hit.page);
+                        }
+                        if let Some(new_hit) = ss.hits.get(*new_idx) {
+                            self.rendered_pages.remove(&new_hit.page);
+                        }
+                    }
+                }
+                _ => {}
+            }
             self.last_search_overlay = search_overlay.clone();
         }
 
@@ -379,11 +399,21 @@ impl<'a> Widget for StatusBar<'a> {
             )
         } else if has_search {
             let ss = self.search_state.unwrap();
+            let progress = if ss.searching {
+                format!(" (searching {}/{}...)", ss.pages_searched(), ss.total_pages())
+            } else {
+                String::new()
+            };
+            let pos = if ss.hit_count() > 0 {
+                format!("{}/{}", ss.current + 1, ss.hit_count())
+            } else {
+                "0".to_string()
+            };
             format!(
-                " Search: \"{}\" | {}/{} matches | n/N: next/prev | Esc: clear | Page {}/{} ",
+                " Search: \"{}\" | {} matches{} | n/p: next/prev | Esc: clear | Page {}/{} ",
                 ss.query,
-                ss.current + 1,
-                ss.hit_count(),
+                pos,
+                progress,
                 self.state.current_page() + 1,
                 self.state.page_count(),
             )

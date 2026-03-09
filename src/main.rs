@@ -81,6 +81,19 @@ fn run_app(
     search_input: &mut Option<String>,
 ) -> io::Result<()> {
     loop {
+        // Progress incremental search
+        if search_state.searching {
+            let _ = search_state.search_tick(document);
+            // Auto-jump to first result
+            if !search_state.jumped && !search_state.hits.is_empty() {
+                search_state.jumped = true;
+                search_state.next_hit_from_page(pdf_state.current_page());
+                if let Some(hit) = search_state.current_hit() {
+                    pdf_state.scroll_to_point(hit.page, hit.y0);
+                }
+            }
+        }
+
         terminal.draw(|frame| {
             let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
@@ -169,14 +182,12 @@ fn run_app(
                             if let Some(input) = search_input.as_ref() {
                                 if !input.is_empty() {
                                     let query = input.clone();
-                                    let _ = search_state.search(document, &query);
-                                    // Jump to first hit on or after current page
-                                    if search_state.active {
-                                        search_state.next_hit_from_page(pdf_state.current_page());
-                                        if let Some(hit) = search_state.current_hit() {
-                                            pdf_state.scroll_to_point(hit.page, hit.y0);
-                                        }
-                                    }
+                                    let current_page = pdf_state.current_page();
+                                    search_state.start_search(
+                                        &query,
+                                        document.page_count(),
+                                        current_page,
+                                    );
                                 }
                             }
                             *search_input = None;
@@ -298,15 +309,17 @@ fn run_app(
                                 pdf_state.next_page();
                             }
                         }
-                        KeyCode::Char('N') => {
+                        KeyCode::Char('p') => {
                             if search_state.active {
                                 search_state.prev_hit();
                                 if let Some(hit) = search_state.current_hit() {
                                     pdf_state.scroll_to_point(hit.page, hit.y0);
                                 }
+                            } else {
+                                pdf_state.prev_page();
                             }
                         }
-                        KeyCode::Char('p') | KeyCode::Left | KeyCode::PageUp => {
+                        KeyCode::Left | KeyCode::PageUp => {
                             pdf_state.prev_page()
                         }
                         KeyCode::Right | KeyCode::PageDown => pdf_state.next_page(),
