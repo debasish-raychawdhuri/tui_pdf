@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::io::Cursor;
 
-use image::{DynamicImage, Rgb, RgbImage};
+use image::{DynamicImage, ImageFormat, Rgb, RgbImage};
 use mupdf::Matrix;
 
 use crate::document::Document;
 use crate::error::Result;
 
-const MAX_CACHE_ENTRIES: usize = 30;
+/// Maximum total bytes for the stripe PNG cache (1 GB).
+const MAX_CACHE_BYTES: usize = 1_073_741_824;
+
 /// PDF points are 1/72 inch. Scale to this DPI for rendering.
 pub const DEFAULT_DPI: f32 = 192.0;
 
@@ -50,6 +53,20 @@ pub fn split_into_stripes(img: &DynamicImage, stripe_height: u32) -> Vec<Dynamic
         y += h;
     }
     stripes
+}
+
+/// Encode a DynamicImage as PNG bytes.
+pub fn encode_png(img: &DynamicImage) -> Vec<u8> {
+    let mut buf = Cursor::new(Vec::new());
+    img.write_to(&mut buf, ImageFormat::Png)
+        .expect("PNG encoding should not fail");
+    buf.into_inner()
+}
+
+/// Decode PNG bytes back to a DynamicImage.
+pub fn decode_png(data: &[u8]) -> DynamicImage {
+    image::load_from_memory_with_format(data, ImageFormat::Png)
+        .expect("cached PNG should be valid")
 }
 
 fn pixmap_to_image(page: &mupdf::Page, matrix: &Matrix) -> Result<DynamicImage> {
@@ -108,34 +125,55 @@ pub fn overlay_highlights(img: &DynamicImage, zoom: f32, highlights: &[Highlight
     DynamicImage::ImageRgb8(rgb)
 }
 
-pub struct PageCache {
-    entries: HashMap<(usize, u32), DynamicImage>,
+/// Cache of stripe PNG bytes, keyed by (page_index, zoom_key).
+/// Evicts oldest entries (by insertion order) when total bytes exceed the limit.
+pub struct StripeCache {
+    /// page_index, zoom_key -> list of PNG-encoded stripes
+    entries: HashMap<(usize, u32), Vec<Vec<u8>>>,
+    /// Insertion order for LRU-style eviction
+    order: Vec<(usize, u32)>,
+    /// Total bytes across all cached PNGs
+    total_bytes: usize,
 }
 
-impl PageCache {
+impl StripeCache {
     pub fn new() -> Self {
         Self {
             entries: HashMap::new(),
+            order: Vec::new(),
+            total_bytes: 0,
         }
     }
 
-    pub fn get(&self, page_index: usize, key: u32) -> Option<&DynamicImage> {
+    pub fn get(&self, page_index: usize, key: u32) -> Option<&Vec<Vec<u8>>> {
         self.entries.get(&(page_index, key))
     }
 
-    pub fn insert(&mut self, page_index: usize, key: u32, image: DynamicImage) {
-        if self.entries.len() >= MAX_CACHE_ENTRIES {
-            self.entries.clear();
+    pub fn insert(&mut self, page_index: usize, key: u32, stripe_pngs: Vec<Vec<u8>>) {
+        let entry_bytes: usize = stripe_pngs.iter().map(|p| p.len()).sum();
+
+        // Evict oldest entries until we have room
+        while self.total_bytes + entry_bytes > MAX_CACHE_BYTES && !self.order.is_empty() {
+            let oldest_key = self.order.remove(0);
+            if let Some(removed) = self.entries.remove(&oldest_key) {
+                let removed_bytes: usize = removed.iter().map(|p| p.len()).sum();
+                self.total_bytes -= removed_bytes;
+            }
         }
-        self.entries.insert((page_index, key), image);
+
+        self.entries.insert((page_index, key), stripe_pngs);
+        self.order.push((page_index, key));
+        self.total_bytes += entry_bytes;
     }
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.order.clear();
+        self.total_bytes = 0;
     }
 }
 
-impl Default for PageCache {
+impl Default for StripeCache {
     fn default() -> Self {
         Self::new()
     }

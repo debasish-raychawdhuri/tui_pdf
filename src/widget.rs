@@ -6,17 +6,39 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use ratatui_image::picker::Picker;
-use ratatui_image::protocol::StatefulProtocol;
-use ratatui_image::StatefulImage;
+use ratatui_image::protocol::Protocol;
+use ratatui_image::{Image, Resize};
 
 use crate::document::Document;
 use crate::error::Result;
 use crate::links::LinkState;
 use crate::renderer::{
-    compute_stripe_count, overlay_highlights, render_page_dpi, split_into_stripes, HighlightRect,
-    PageCache,
+    compute_stripe_count, decode_png, encode_png, overlay_highlights, render_page_dpi,
+    split_into_stripes, HighlightRect, StripeCache,
 };
 use crate::search::SearchState;
+
+/// Reassemble a full image from stripe PNG bytes.
+fn reassemble_stripes(stripe_pngs: &[Vec<u8>]) -> image::DynamicImage {
+    let stripes: Vec<image::DynamicImage> = stripe_pngs.iter().map(|p| decode_png(p)).collect();
+    if stripes.is_empty() {
+        return image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1));
+    }
+    let width = stripes[0].width();
+    let total_height: u32 = stripes.iter().map(|s| s.height()).sum();
+    let mut combined = image::RgbImage::new(width, total_height);
+    let mut y = 0;
+    for stripe in &stripes {
+        let rgb = stripe.to_rgb8();
+        for sy in 0..rgb.height() {
+            for sx in 0..rgb.width().min(width) {
+                combined.put_pixel(sx, y + sy, *rgb.get_pixel(sx, sy));
+            }
+        }
+        y += rgb.height();
+    }
+    image::DynamicImage::ImageRgb8(combined)
+}
 
 pub struct PdfViewState {
     pub global_scroll: usize,
@@ -30,16 +52,19 @@ pub struct PdfViewState {
     cumulative_stripes: Vec<usize>,
     total_stripes: usize,
 
-    // Sliding window of rendered pages: page_index -> stripes
-    rendered_pages: HashMap<usize, Vec<StatefulProtocol>>,
+    // Protocol cache for display: page_index -> stripe protocols (pre-encoded, no resize on render)
+    rendered_pages: HashMap<usize, Vec<Protocol>>,
 
-    cache: PageCache,
-    dirty: bool,
+    // The one true cache: stripe PNGs
+    cache: StripeCache,
+
     last_key: u32,
-    // Track link overlay state to know when to rebuild stripes
-    last_link_overlay: Option<(usize, usize)>, // (page, selected_link)
-    // Track search overlay state to know when to rebuild stripes
-    last_search_overlay: Option<(String, usize)>, // (query, current_hit)
+    last_link_overlay: Option<(usize, usize)>,
+    last_search_overlay: Option<(String, usize)>,
+
+    // Pre-render: next page to render, renders outward from start
+    prerender_queue: Vec<usize>,
+    prerender_pos: usize,
 }
 
 impl PdfViewState {
@@ -54,11 +79,12 @@ impl PdfViewState {
             cumulative_stripes: Vec::new(),
             total_stripes: 0,
             rendered_pages: HashMap::new(),
-            cache: PageCache::new(),
-            dirty: true,
+            cache: StripeCache::new(),
             last_key: 0,
             last_link_overlay: None,
             last_search_overlay: None,
+            prerender_queue: Vec::new(),
+            prerender_pos: 0,
         }
     }
 
@@ -93,8 +119,6 @@ impl PdfViewState {
         }
     }
 
-    /// Scroll so that a specific PDF y-coordinate on a page is visible.
-    /// `pdf_y` is in PDF points.
     pub fn scroll_to_point(&mut self, page: usize, pdf_y: f32) {
         if page >= self.page_count || self.cumulative_stripes.is_empty() {
             return;
@@ -104,7 +128,6 @@ impl PdfViewState {
         let pixel_y = (pdf_y * scale) as u32;
         let stripe = (pixel_y / font_height) as usize;
         let target = self.cumulative_stripes[page] + stripe;
-        // Position the match a few rows from the top so it's clearly visible
         self.global_scroll = target.saturating_sub(3).min(self.total_stripes.saturating_sub(1));
     }
 
@@ -125,14 +148,24 @@ impl PdfViewState {
         self.global_scroll = self.global_scroll.saturating_sub(rows);
     }
 
-    pub fn zoom_in(&mut self) {
+    pub fn zoom_in(&mut self, document: &Document) {
         self.zoom = (self.zoom + 0.25).min(5.0);
-        self.dirty = true;
+        self.on_zoom_change(document);
     }
 
-    pub fn zoom_out(&mut self) {
+    pub fn zoom_out(&mut self, document: &Document) {
         self.zoom = (self.zoom - 0.25).max(0.25);
-        self.dirty = true;
+        self.on_zoom_change(document);
+    }
+
+    fn on_zoom_change(&mut self, document: &Document) {
+        let _ = self.recompute_geometry(document);
+        self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
+        self.last_link_overlay = None;
+        self.last_search_overlay = None;
+        self.rendered_pages.clear();
+        // Re-render visible pages immediately at new zoom
+        let _ = self.initial_render(document);
     }
 
     pub fn page_count(&self) -> usize {
@@ -166,22 +199,142 @@ impl PdfViewState {
         (w, h)
     }
 
+    /// Build a pre-render queue that spirals outward from `center_page`.
+    fn build_prerender_queue(&mut self, center_page: usize) {
+        self.prerender_queue.clear();
+        self.prerender_pos = 0;
+
+        let center = center_page.min(self.page_count.saturating_sub(1));
+        let mut left = center as isize;
+        let mut right = center as isize + 1;
+        // Add center first
+        self.prerender_queue.push(center);
+
+        loop {
+            let mut added = false;
+            if left > 0 {
+                left -= 1;
+                self.prerender_queue.push(left as usize);
+                added = true;
+            }
+            if (right as usize) < self.page_count {
+                self.prerender_queue.push(right as usize);
+                right += 1;
+                added = true;
+            }
+            if !added {
+                break;
+            }
+        }
+    }
+
+    /// Build a pre-encoded Protocol from a DynamicImage stripe.
+    fn build_protocol(&self, img: image::DynamicImage) -> Option<Protocol> {
+        let font_size = self.picker.font_size();
+        let w = (img.width() as f32 / font_size.0 as f32).ceil() as u16;
+        let h = (img.height() as f32 / font_size.1 as f32).ceil() as u16;
+        let size = Rect::new(0, 0, w, h);
+        self.picker.new_protocol(img, size, Resize::Crop(None)).ok()
+    }
+
+    /// Build protocols for a single page from cached PNGs.
+    fn build_page_protocols(&mut self, page_idx: usize) {
+        let cache_key = (self.zoom * 100.0) as u32;
+        if self.rendered_pages.contains_key(&page_idx) {
+            return;
+        }
+        if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
+            let protocols: Vec<Protocol> = stripe_pngs
+                .iter()
+                .filter_map(|png| self.build_protocol(decode_png(png)))
+                .collect();
+            self.rendered_pages.insert(page_idx, protocols);
+        }
+    }
+
+    /// Render one page from the pre-render queue into stripe PNG cache.
+    /// Does NOT build protocols — those are built on-demand in update_image.
+    /// Returns true if there is more work to do.
+    pub fn prerender_tick(&mut self, document: &Document) -> bool {
+        let cache_key = (self.zoom * 100.0) as u32;
+        let font_height = self.picker.font_size().1 as u32;
+        if font_height == 0 || self.prerender_pos >= self.prerender_queue.len() {
+            return false;
+        }
+
+        let page_idx = self.prerender_queue[self.prerender_pos];
+        self.prerender_pos += 1;
+
+        // Build stripe PNGs if not cached
+        if self.cache.get(page_idx, cache_key).is_none() {
+            if let Ok(img) = render_page_dpi(document, page_idx, self.zoom) {
+                let stripe_images = split_into_stripes(&img, font_height);
+                let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+                self.cache.insert(page_idx, cache_key, stripe_pngs);
+            }
+        }
+
+        self.prerender_pos < self.prerender_queue.len()
+    }
+
+    /// Whether pre-rendering is complete.
+    pub fn prerender_done(&self) -> bool {
+        self.prerender_pos >= self.prerender_queue.len()
+    }
+
+    /// Refocus pre-render around the user's current page.
+    /// Called when the user scrolls to an area with uncached pages.
+    pub fn refocus_prerender(&mut self) {
+        let current = self.current_page();
+        self.build_prerender_queue(current);
+    }
+
+    /// Initial setup: render the first visible pages immediately, then queue the rest.
+    pub fn initial_render(&mut self, document: &Document) -> Result<()> {
+        let cache_key = (self.zoom * 100.0) as u32;
+
+        if self.last_key != cache_key {
+            self.recompute_geometry(document)?;
+            self.last_key = cache_key;
+            self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
+        }
+
+        let font_height = self.picker.font_size().1 as u32;
+        let current = self.current_page();
+
+        // Render current page and next page immediately (PNGs + protocols)
+        for page_idx in current..(current + 2).min(self.page_count) {
+            if self.cache.get(page_idx, cache_key).is_none() {
+                let img = render_page_dpi(document, page_idx, self.zoom)?;
+                let stripe_images = split_into_stripes(&img, font_height);
+                let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+                self.cache.insert(page_idx, cache_key, stripe_pngs);
+            }
+            if !self.rendered_pages.contains_key(&page_idx) {
+                if let Some(pngs) = self.cache.get(page_idx, cache_key) {
+                    let protocols: Vec<Protocol> = pngs
+                        .iter()
+                        .filter_map(|png| self.build_protocol(decode_png(png)))
+                        .collect();
+                    self.rendered_pages.insert(page_idx, protocols);
+                }
+            }
+        }
+
+        // Queue the rest, spiraling outward from current page
+        self.build_prerender_queue(current);
+
+        Ok(())
+    }
+
+    /// Display path: build protocols from cached stripe PNGs only.
+    /// Never calls MuPDF. Pages not yet in cache are skipped (blank).
     pub fn update_image(
         &mut self,
-        document: &Document,
         link_state: Option<&LinkState>,
         search_state: Option<&SearchState>,
     ) -> Result<()> {
         let cache_key = (self.zoom * 100.0) as u32;
-
-        if self.dirty || self.last_key != cache_key {
-            self.recompute_geometry(document)?;
-            self.dirty = false;
-            self.last_key = cache_key;
-            self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
-            self.last_link_overlay = None;
-            self.last_search_overlay = None;
-        }
 
         // Determine current link overlay state
         let link_overlay = link_state.and_then(|ls| {
@@ -192,7 +345,6 @@ impl PdfViewState {
             }
         });
 
-        // If link overlay changed, rebuild stripes for the affected page
         let link_changed = link_overlay != self.last_link_overlay;
         if link_changed {
             if let Some((old_page, _)) = self.last_link_overlay {
@@ -216,17 +368,13 @@ impl PdfViewState {
         let search_changed = search_overlay != self.last_search_overlay;
         if search_changed {
             match (&self.last_search_overlay, &search_overlay) {
-                // Query changed or search toggled: invalidate all pages with hits
                 (None, Some(_)) | (Some(_), None) => {
                     self.rendered_pages.clear();
                 }
                 (Some((old_q, old_idx)), Some((new_q, new_idx))) => {
                     if old_q != new_q {
-                        // Different query: full invalidation
                         self.rendered_pages.clear();
                     } else if let Some(ss) = search_state {
-                        // Same query, just moved the current highlight index.
-                        // Only invalidate pages that held the old or new current hit.
                         if let Some(old_hit) = ss.hits.get(*old_idx) {
                             self.rendered_pages.remove(&old_hit.page);
                         }
@@ -241,32 +389,29 @@ impl PdfViewState {
         }
 
         let current = self.current_page();
-        let window_start = current.saturating_sub(1);
-        let window_end = (current + 2).min(self.page_count);
+        let window_start = current.saturating_sub(5);
+        let window_end = (current + 6).min(self.page_count);
 
-        // Evict pages outside the window
-        self.rendered_pages
-            .retain(|&page_idx, _| page_idx >= window_start && page_idx < window_end);
+        // If current page isn't cached, refocus pre-render around it
+        if self.cache.get(current, cache_key).is_none() {
+            self.build_prerender_queue(current);
+        }
 
-        // Render pages in the window that aren't yet rendered
-        let font_height = self.picker.font_size().1 as u32;
+        // Evict protocols for pages far from the viewport to bound Kitty image memory
+        let evict_start = current.saturating_sub(15);
+        let evict_end = (current + 16).min(self.page_count);
+        self.rendered_pages.retain(|&page, _| page >= evict_start && page < evict_end);
+
+        // Build protocols for pages in the visible window (from cached PNGs)
         for page_idx in window_start..window_end {
-            if self.rendered_pages.contains_key(&page_idx) {
-                continue;
-            }
+            self.build_page_protocols(page_idx);
+        }
 
-            let img = if let Some(cached) = self.cache.get(page_idx, cache_key) {
-                cached.clone()
-            } else {
-                let rendered = render_page_dpi(document, page_idx, self.zoom)?;
-                self.cache.insert(page_idx, cache_key, rendered.clone());
-                rendered
-            };
-
-            // Collect all highlights for this page
+        // Build highlight overlays for pages that need them
+        for page_idx in window_start..window_end {
+            // Collect highlights for this page
             let mut highlights: Vec<HighlightRect> = Vec::new();
 
-            // Link highlights
             if let (Some(ls), Some((lp, sel))) = (link_state, link_overlay) {
                 if page_idx == lp {
                     for (i, link) in ls.links.iter().enumerate() {
@@ -287,7 +432,6 @@ impl PdfViewState {
                 }
             }
 
-            // Search highlights
             if let Some(ss) = search_state {
                 if ss.active {
                     let current_hit = ss.current_hit();
@@ -303,9 +447,9 @@ impl PdfViewState {
                             x1: hit.x1,
                             y1: hit.y1,
                             color: if is_current {
-                                [255, 140, 0] // orange for current
+                                [255, 140, 0]
                             } else {
-                                [255, 255, 50] // yellow for others
+                                [255, 255, 50]
                             },
                             alpha: if is_current { 0.5 } else { 0.3 },
                         });
@@ -313,18 +457,22 @@ impl PdfViewState {
                 }
             }
 
-            let img = if highlights.is_empty() {
-                img
-            } else {
-                overlay_highlights(&img, self.zoom, &highlights)
-            };
-
-            let stripe_images = split_into_stripes(&img, font_height);
-            let protocols: Vec<StatefulProtocol> = stripe_images
-                .into_iter()
-                .map(|s| self.picker.new_resize_protocol(s))
-                .collect();
-            self.rendered_pages.insert(page_idx, protocols);
+            if !highlights.is_empty() {
+                // Highlighted page: rebuild protocols from PNGs + overlay
+                if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
+                    let full_img = reassemble_stripes(stripe_pngs);
+                    let highlighted = overlay_highlights(&full_img, self.zoom, &highlights);
+                    let font_height = self.picker.font_size().1 as u32;
+                    let stripes = split_into_stripes(&highlighted, font_height);
+                    let protocols: Vec<Protocol> = stripes
+                        .into_iter()
+                        .filter_map(|s| self.build_protocol(s))
+                        .collect();
+                    self.rendered_pages.insert(page_idx, protocols);
+                }
+            }
+            // No highlights + already in rendered_pages = nothing to do (instant)
+            // No highlights + not in rendered_pages = blank until prerender catches up
         }
 
         Ok(())
@@ -385,10 +533,9 @@ impl StatefulWidget for PdfWidget {
                             width: area.width - x_offset,
                             height: 1,
                         };
-                        StatefulImage::default().render(
+                        Image::new(&mut page_stripes[stripe_local]).render(
                             row_rect,
                             buf,
-                            &mut page_stripes[stripe_local],
                         );
                     }
                     screen_row += 1;

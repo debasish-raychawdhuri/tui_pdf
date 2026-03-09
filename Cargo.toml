@@ -11,6 +11,9 @@ path = "src/lib.rs"
 name = "tui-pdf"
 path = "src/main.rs"
 
+[profile.dev.package."*"]
+opt-level = 2
+
 [dependencies]
 mupdf = "0.4"
 ratatui = { version = "0.29", features = ["crossterm"] }

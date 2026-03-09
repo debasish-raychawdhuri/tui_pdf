@@ -35,6 +35,12 @@ fn main() -> io::Result<()> {
 
     let mut pdf_state = PdfViewState::new(document.page_count(), picker);
 
+    // Render first 2 pages immediately so the PDF shows right away
+    pdf_state.initial_render(&document).unwrap_or_else(|e| {
+        eprintln!("Failed to render PDF: {e}");
+        std::process::exit(1);
+    });
+
     let outlines = document.outlines().unwrap_or_default();
     let mut toc_state = TocState::new(&outlines);
     let mut link_state = LinkState::new();
@@ -84,7 +90,6 @@ fn run_app(
         // Progress incremental search
         if search_state.searching {
             let _ = search_state.search_tick(document);
-            // Auto-jump to first result
             if !search_state.jumped && !search_state.hits.is_empty() {
                 search_state.jumped = true;
                 search_state.next_hit_from_page(pdf_state.current_page());
@@ -94,6 +99,7 @@ fn run_app(
             }
         }
 
+        // Display: only reads from stripe PNG cache, never calls MuPDF
         terminal.draw(|frame| {
             let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
@@ -116,14 +122,14 @@ fn run_app(
 
                 TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
 
-                if let Err(e) = pdf_state.update_image(document, Some(link_state), search_opt) {
+                if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
                     let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, cols[1]);
                 } else {
                     frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
                 }
             } else {
-                if let Err(e) = pdf_state.update_image(document, Some(link_state), search_opt) {
+                if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
                     let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, main_area);
                 } else {
@@ -131,7 +137,7 @@ fn run_app(
                 }
             }
 
-            // Status bar: show input prompts or normal bar
+            // Status bar
             if let Some(input) = search_input.as_ref() {
                 let prompt = format!(" /{}█ ", input);
                 let line = Line::from(vec![Span::styled(
@@ -166,7 +172,8 @@ fn run_app(
             }
         })?;
 
-        if event::poll(Duration::from_millis(100))? {
+        // Short poll for input
+        if event::poll(Duration::from_millis(16))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -325,11 +332,20 @@ fn run_app(
                         KeyCode::Right | KeyCode::PageDown => pdf_state.next_page(),
                         KeyCode::Char('j') | KeyCode::Down => pdf_state.scroll_down(3),
                         KeyCode::Char('k') | KeyCode::Up => pdf_state.scroll_up(3),
-                        KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(),
-                        KeyCode::Char('-') => pdf_state.zoom_out(),
+                        KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(document),
+                        KeyCode::Char('-') => pdf_state.zoom_out(document),
                         KeyCode::Home => pdf_state.first_page(),
                         KeyCode::End => pdf_state.last_page(),
                         _ => {}
+                    }
+                }
+            }
+        } else {
+            // Idle: no user input, pre-render pages until input arrives or done
+            if !pdf_state.prerender_done() {
+                while pdf_state.prerender_tick(document) {
+                    if event::poll(Duration::from_millis(0))? {
+                        break;
                     }
                 }
             }
