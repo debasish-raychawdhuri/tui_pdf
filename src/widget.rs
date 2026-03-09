@@ -26,6 +26,7 @@ pub struct PdfViewState {
 
     // Geometry: stripe count per page, prefix sums for global offset
     page_stripe_counts: Vec<usize>,
+    page_pixel_widths: Vec<u32>,
     cumulative_stripes: Vec<usize>,
     total_stripes: usize,
 
@@ -49,6 +50,7 @@ impl PdfViewState {
             page_count,
             picker,
             page_stripe_counts: Vec::new(),
+            page_pixel_widths: Vec::new(),
             cumulative_stripes: Vec::new(),
             total_stripes: 0,
             rendered_pages: HashMap::new(),
@@ -139,18 +141,29 @@ impl PdfViewState {
 
     fn recompute_geometry(&mut self, document: &Document) -> Result<()> {
         let font_height = self.picker.font_size().1 as u32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         self.page_stripe_counts.clear();
+        self.page_pixel_widths.clear();
         self.cumulative_stripes.clear();
         let mut cumulative = 0;
         for i in 0..self.page_count {
             self.cumulative_stripes.push(cumulative);
             let count = compute_stripe_count(document, i, self.zoom, font_height)?;
             self.page_stripe_counts.push(count);
+            let (w, _) = document.page_size(i)?;
+            self.page_pixel_widths.push((w * scale) as u32);
             cumulative += count;
         }
         self.total_stripes = cumulative;
         self.rendered_pages.clear();
         Ok(())
+    }
+
+    fn page_pixel_size(&self, page_idx: usize) -> (u32, u32) {
+        let w = self.page_pixel_widths.get(page_idx).copied().unwrap_or(0);
+        let font_height = self.picker.font_size().1 as u32;
+        let h = self.page_stripe_counts.get(page_idx).copied().unwrap_or(0) as u32 * font_height;
+        (w, h)
     }
 
     pub fn update_image(
@@ -348,14 +361,28 @@ impl StatefulWidget for PdfWidget {
             let rows_left_on_screen = global_end - g;
             let count = stripes_left_in_page.min(rows_left_on_screen);
 
+            // Compute horizontal centering offset for this page
+            let font_width = state.picker.font_size().0 as u16;
+            let img_cols = if font_width > 0 {
+                let (pw, _) = state.page_pixel_size(page_idx);
+                ((pw as u16) + font_width - 1) / font_width
+            } else {
+                area.width
+            };
+            let x_offset = if img_cols < area.width {
+                (area.width - img_cols) / 2
+            } else {
+                0
+            };
+
             if let Some(page_stripes) = state.rendered_pages.get_mut(&page_idx) {
                 for offset in 0..count {
                     let stripe_local = local_stripe + offset;
                     if stripe_local < page_stripes.len() {
                         let row_rect = Rect {
-                            x: area.x,
+                            x: area.x + x_offset,
                             y: area.y + screen_row as u16,
-                            width: area.width,
+                            width: area.width - x_offset,
                             height: 1,
                         };
                         StatefulImage::default().render(
