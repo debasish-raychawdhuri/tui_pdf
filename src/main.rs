@@ -8,7 +8,9 @@ use crossterm::terminal::{
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
-use ratatui::widgets::StatefulWidget;
+use ratatui::style::{Color, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
@@ -36,6 +38,7 @@ fn main() -> io::Result<()> {
     let outlines = document.outlines().unwrap_or_default();
     let mut toc_state = TocState::new(&outlines);
     let mut link_state = LinkState::new();
+    let mut goto_input: Option<String> = None;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -49,6 +52,7 @@ fn main() -> io::Result<()> {
         &mut pdf_state,
         &mut toc_state,
         &mut link_state,
+        &mut goto_input,
     );
 
     disable_raw_mode()?;
@@ -68,6 +72,7 @@ fn run_app(
     pdf_state: &mut PdfViewState,
     toc_state: &mut TocState,
     link_state: &mut LinkState,
+    goto_input: &mut Option<String>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| {
@@ -101,18 +106,65 @@ fn run_app(
                 }
             }
 
-            frame.render_widget(
-                StatusBar {
-                    state: &*pdf_state,
-                    link_state: Some(&*link_state),
-                },
-                status_area,
-            );
+            // Status bar: show goto prompt if active, otherwise normal bar
+            if let Some(input) = goto_input.as_ref() {
+                let prompt = format!(
+                    " Go to page (1-{}): {}█ ",
+                    pdf_state.page_count(),
+                    input,
+                );
+                let line = Line::from(vec![Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(Color::Cyan))
+                    .render(status_area, frame.buffer_mut());
+            } else {
+                frame.render_widget(
+                    StatusBar {
+                        state: &*pdf_state,
+                        link_state: Some(&*link_state),
+                    },
+                    status_area,
+                );
+            }
         })?;
 
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // Go-to-page input mode
+                if goto_input.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            *goto_input = None;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(input) = goto_input.as_ref() {
+                                if let Ok(page) = input.parse::<usize>() {
+                                    if page >= 1 && page <= pdf_state.page_count() {
+                                        pdf_state.go_to_page(page - 1);
+                                    }
+                                }
+                            }
+                            *goto_input = None;
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = goto_input.as_mut() {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if let Some(input) = goto_input.as_mut() {
+                                input.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -150,6 +202,9 @@ fn run_app(
                 } else {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('g') => {
+                            *goto_input = Some(String::new());
+                        }
                         KeyCode::Char('t') => {
                             if toc_state.has_entries() {
                                 toc_state.toggle();
