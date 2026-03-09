@@ -18,28 +18,6 @@ use crate::renderer::{
 };
 use crate::search::SearchState;
 
-/// Reassemble a full image from stripe PNG bytes.
-fn reassemble_stripes(stripe_pngs: &[Vec<u8>]) -> image::DynamicImage {
-    let stripes: Vec<image::DynamicImage> = stripe_pngs.iter().map(|p| decode_png(p)).collect();
-    if stripes.is_empty() {
-        return image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1));
-    }
-    let width = stripes[0].width();
-    let total_height: u32 = stripes.iter().map(|s| s.height()).sum();
-    let mut combined = image::RgbImage::new(width, total_height);
-    let mut y = 0;
-    for stripe in &stripes {
-        let rgb = stripe.to_rgb8();
-        for sy in 0..rgb.height() {
-            for sx in 0..rgb.width().min(width) {
-                combined.put_pixel(sx, y + sy, *rgb.get_pixel(sx, sy));
-            }
-        }
-        y += rgb.height();
-    }
-    image::DynamicImage::ImageRgb8(combined)
-}
-
 pub struct PdfViewState {
     pub global_scroll: usize,
     pub zoom: f32,
@@ -61,6 +39,8 @@ pub struct PdfViewState {
     last_key: u32,
     last_link_overlay: Option<(usize, usize)>,
     last_search_overlay: Option<(String, usize)>,
+    /// Stripes that currently have highlight overlays: (page, stripe_index)
+    dirty_highlight_stripes: Vec<(usize, usize)>,
 
     // Pre-render: next page to render, renders outward from start
     prerender_queue: Vec<usize>,
@@ -83,6 +63,7 @@ impl PdfViewState {
             last_key: 0,
             last_link_overlay: None,
             last_search_overlay: None,
+            dirty_highlight_stripes: Vec::new(),
             prerender_queue: Vec::new(),
             prerender_pos: 0,
         }
@@ -164,6 +145,7 @@ impl PdfViewState {
         self.last_link_overlay = None;
         self.last_search_overlay = None;
         self.rendered_pages.clear();
+        self.dirty_highlight_stripes.clear();
         // Re-render visible pages immediately at new zoom
         let _ = self.initial_render(document);
     }
@@ -349,9 +331,11 @@ impl PdfViewState {
         if link_changed {
             if let Some((old_page, _)) = self.last_link_overlay {
                 self.rendered_pages.remove(&old_page);
+                self.dirty_highlight_stripes.retain(|(p, _)| *p != old_page);
             }
             if let Some((new_page, _)) = link_overlay {
                 self.rendered_pages.remove(&new_page);
+                self.dirty_highlight_stripes.retain(|(p, _)| *p != new_page);
             }
             self.last_link_overlay = link_overlay;
         }
@@ -370,20 +354,15 @@ impl PdfViewState {
             match (&self.last_search_overlay, &search_overlay) {
                 (None, Some(_)) | (Some(_), None) => {
                     self.rendered_pages.clear();
+                    self.dirty_highlight_stripes.clear();
                 }
-                (Some((old_q, old_idx)), Some((new_q, new_idx))) => {
-                    if old_q != new_q {
-                        self.rendered_pages.clear();
-                    } else if let Some(ss) = search_state {
-                        if let Some(old_hit) = ss.hits.get(*old_idx) {
-                            self.rendered_pages.remove(&old_hit.page);
-                        }
-                        if let Some(new_hit) = ss.hits.get(*new_idx) {
-                            self.rendered_pages.remove(&new_hit.page);
-                        }
-                    }
+                (Some((old_q, _)), Some((new_q, _))) if old_q != new_q => {
+                    self.rendered_pages.clear();
+                    self.dirty_highlight_stripes.clear();
                 }
-                _ => {}
+                _ => {
+                    // Same query, just moved current index — handled by per-stripe rebuild below
+                }
             }
             self.last_search_overlay = search_overlay.clone();
         }
@@ -407,7 +386,28 @@ impl PdfViewState {
             self.build_page_protocols(page_idx);
         }
 
-        // Build highlight overlays for pages that need them
+        // Restore previously highlighted stripes to their base (unhighlighted) versions
+        let font_height = self.picker.font_size().1 as u32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+
+        if link_changed || search_changed {
+            let old_dirty = std::mem::take(&mut self.dirty_highlight_stripes);
+            for (page_idx, stripe_idx) in old_dirty {
+                if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
+                    if let Some(png) = stripe_pngs.get(stripe_idx) {
+                        if let Some(proto) = self.build_protocol(decode_png(png)) {
+                            if let Some(page_protos) = self.rendered_pages.get_mut(&page_idx) {
+                                if stripe_idx < page_protos.len() {
+                                    page_protos[stripe_idx] = proto;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build highlight overlays — only rebuild individual stripes that overlap highlights
         for page_idx in window_start..window_end {
             // Collect highlights for this page
             let mut highlights: Vec<HighlightRect> = Vec::new();
@@ -457,22 +457,74 @@ impl PdfViewState {
                 }
             }
 
-            if !highlights.is_empty() {
-                // Highlighted page: rebuild protocols from PNGs + overlay
-                if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
-                    let full_img = reassemble_stripes(stripe_pngs);
-                    let highlighted = overlay_highlights(&full_img, self.zoom, &highlights);
-                    let font_height = self.picker.font_size().1 as u32;
-                    let stripes = split_into_stripes(&highlighted, font_height);
-                    let protocols: Vec<Protocol> = stripes
-                        .into_iter()
-                        .filter_map(|s| self.build_protocol(s))
+            if highlights.is_empty() {
+                continue;
+            }
+
+            // Determine which stripe indices are touched by any highlight
+            let stripe_count = self.page_stripe_counts.get(page_idx).copied().unwrap_or(0);
+            let mut dirty_stripes = vec![false; stripe_count];
+            for hl in &highlights {
+                let s0 = ((hl.y0 * scale) as u32 / font_height.max(1)) as usize;
+                let s1 = (((hl.y1 * scale) as u32 + font_height - 1) / font_height.max(1)) as usize;
+                for s in s0..s1.min(stripe_count) {
+                    dirty_stripes[s] = true;
+                    self.dirty_highlight_stripes.push((page_idx, s));
+                }
+            }
+
+            // Only rebuild the dirty stripes, keep the rest from base protocols
+            if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
+                // Ensure we have base protocols for this page
+                let has_protocols = self.rendered_pages.contains_key(&page_idx)
+                    && self.rendered_pages[&page_idx].len() == stripe_count;
+
+                if !has_protocols {
+                    // Build full base protocols first
+                    let protocols: Vec<Protocol> = stripe_pngs
+                        .iter()
+                        .filter_map(|png| self.build_protocol(decode_png(png)))
                         .collect();
                     self.rendered_pages.insert(page_idx, protocols);
                 }
+
+                // Now selectively rebuild only dirty stripes
+                for (s, is_dirty) in dirty_stripes.iter().enumerate() {
+                    if !*is_dirty {
+                        continue;
+                    }
+                    if s >= stripe_pngs.len() {
+                        break;
+                    }
+                    // Decode this one stripe, overlay highlights onto it, re-encode protocol
+                    let base_stripe = decode_png(&stripe_pngs[s]);
+                    let stripe_y_offset = (s as u32 * font_height) as f32 / scale;
+                    let stripe_h = font_height as f32 / scale;
+
+                    // Shift highlight coords relative to this stripe
+                    let local_highlights: Vec<HighlightRect> = highlights
+                        .iter()
+                        .filter(|hl| hl.y1 > stripe_y_offset && hl.y0 < stripe_y_offset + stripe_h)
+                        .map(|hl| HighlightRect {
+                            x0: hl.x0,
+                            y0: (hl.y0 - stripe_y_offset).max(0.0),
+                            x1: hl.x1,
+                            y1: (hl.y1 - stripe_y_offset).min(stripe_h),
+                            color: hl.color,
+                            alpha: hl.alpha,
+                        })
+                        .collect();
+
+                    let highlighted = overlay_highlights(&base_stripe, self.zoom, &local_highlights);
+                    if let Some(proto) = self.build_protocol(highlighted) {
+                        if let Some(page_protos) = self.rendered_pages.get_mut(&page_idx) {
+                            if s < page_protos.len() {
+                                page_protos[s] = proto;
+                            }
+                        }
+                    }
+                }
             }
-            // No highlights + already in rendered_pages = nothing to do (instant)
-            // No highlights + not in rendered_pages = blank until prerender catches up
         }
 
         Ok(())
