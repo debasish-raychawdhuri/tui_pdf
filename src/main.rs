@@ -380,6 +380,7 @@ fn run_app(
                         KeyCode::Right | KeyCode::PageDown => pdf_state.next_page(),
                         KeyCode::Char('j') | KeyCode::Down => pdf_state.scroll_down(3),
                         KeyCode::Char('k') | KeyCode::Up => pdf_state.scroll_up(3),
+                        KeyCode::Char('i') => pdf_state.toggle_invert(document),
                         KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(document),
                         KeyCode::Char('-') => pdf_state.zoom_out(document),
                         KeyCode::Home => pdf_state.first_page(),

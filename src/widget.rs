@@ -45,6 +45,8 @@ pub struct PdfViewState {
     // Pre-render: next page to render, renders outward from start
     prerender_queue: Vec<usize>,
     prerender_pos: usize,
+
+    inverted: bool,
 }
 
 impl PdfViewState {
@@ -66,6 +68,7 @@ impl PdfViewState {
             dirty_highlight_stripes: Vec::new(),
             prerender_queue: Vec::new(),
             prerender_pos: 0,
+            inverted: false,
         }
     }
 
@@ -137,6 +140,24 @@ impl PdfViewState {
     pub fn zoom_out(&mut self, document: &Document) {
         self.zoom = (self.zoom - 0.25).max(0.25);
         self.on_zoom_change(document);
+    }
+
+    fn cache_key(&self) -> u32 {
+        let k = (self.zoom * 100.0) as u32;
+        if self.inverted { k | (1 << 31) } else { k }
+    }
+
+    pub fn inverted(&self) -> bool {
+        self.inverted
+    }
+
+    pub fn toggle_invert(&mut self, document: &Document) {
+        self.inverted = !self.inverted;
+        self.last_link_overlay = None;
+        self.last_search_overlay = None;
+        self.rendered_pages.clear();
+        self.dirty_highlight_stripes.clear();
+        let _ = self.initial_render(document);
     }
 
     fn on_zoom_change(&mut self, document: &Document) {
@@ -259,7 +280,7 @@ impl PdfViewState {
 
     /// Build protocols for a single page from cached PNGs.
     fn build_page_protocols(&mut self, page_idx: usize) {
-        let cache_key = (self.zoom * 100.0) as u32;
+        let cache_key = self.cache_key();
         if self.rendered_pages.contains_key(&page_idx) {
             return;
         }
@@ -276,7 +297,7 @@ impl PdfViewState {
     /// Does NOT build protocols — those are built on-demand in update_image.
     /// Returns true if there is more work to do.
     pub fn prerender_tick(&mut self, document: &Document) -> bool {
-        let cache_key = (self.zoom * 100.0) as u32;
+        let cache_key = self.cache_key();
         let font_height = self.picker.font_size().1 as u32;
         if font_height == 0 || self.prerender_pos >= self.prerender_queue.len() {
             return false;
@@ -287,7 +308,10 @@ impl PdfViewState {
 
         // Build stripe PNGs if not cached
         if self.cache.get(page_idx, cache_key).is_none() {
-            if let Ok(img) = render_page_dpi(document, page_idx, self.zoom) {
+            if let Ok(mut img) = render_page_dpi(document, page_idx, self.zoom) {
+                if self.inverted {
+                    img.invert();
+                }
                 let stripe_images = split_into_stripes(&img, font_height);
                 let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
                 self.cache.insert(page_idx, cache_key, stripe_pngs);
@@ -311,7 +335,7 @@ impl PdfViewState {
 
     /// Initial setup: render the first visible pages immediately, then queue the rest.
     pub fn initial_render(&mut self, document: &Document) -> Result<()> {
-        let cache_key = (self.zoom * 100.0) as u32;
+        let cache_key = self.cache_key();
 
         if self.last_key != cache_key {
             self.recompute_geometry(document)?;
@@ -325,7 +349,10 @@ impl PdfViewState {
         // Render current page and next page immediately (PNGs + protocols)
         for page_idx in current..(current + 2).min(self.page_count) {
             if self.cache.get(page_idx, cache_key).is_none() {
-                let img = render_page_dpi(document, page_idx, self.zoom)?;
+                let mut img = render_page_dpi(document, page_idx, self.zoom)?;
+                if self.inverted {
+                    img.invert();
+                }
                 let stripe_images = split_into_stripes(&img, font_height);
                 let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
                 self.cache.insert(page_idx, cache_key, stripe_pngs);
@@ -354,7 +381,7 @@ impl PdfViewState {
         link_state: Option<&LinkState>,
         search_state: Option<&SearchState>,
     ) -> Result<()> {
-        let cache_key = (self.zoom * 100.0) as u32;
+        let cache_key = self.cache_key();
 
         // Determine current link overlay state
         let link_overlay = link_state.and_then(|ls| {
@@ -684,10 +711,11 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}% | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | l: links | t: toc | s: synctex{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | i: invert | l: links | t: toc | s: synctex{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,
+                if self.state.inverted() { " [INV]" } else { "" },
                 back_hint,
             )
         };
