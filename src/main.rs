@@ -14,7 +14,7 @@ use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
-use tui_pdf::{Document, LinkState, PdfViewState, PdfWidget, StatusBar, TocState, TocWidget};
+use tui_pdf::{Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget};
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -38,7 +38,9 @@ fn main() -> io::Result<()> {
     let outlines = document.outlines().unwrap_or_default();
     let mut toc_state = TocState::new(&outlines);
     let mut link_state = LinkState::new();
+    let mut search_state = SearchState::new();
     let mut goto_input: Option<String> = None;
+    let mut search_input: Option<String> = None;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -52,7 +54,9 @@ fn main() -> io::Result<()> {
         &mut pdf_state,
         &mut toc_state,
         &mut link_state,
+        &mut search_state,
         &mut goto_input,
+        &mut search_input,
     );
 
     disable_raw_mode()?;
@@ -72,7 +76,9 @@ fn run_app(
     pdf_state: &mut PdfViewState,
     toc_state: &mut TocState,
     link_state: &mut LinkState,
+    search_state: &mut SearchState,
     goto_input: &mut Option<String>,
+    search_input: &mut Option<String>,
 ) -> io::Result<()> {
     loop {
         terminal.draw(|frame| {
@@ -81,6 +87,12 @@ fn run_app(
 
             let main_area = outer[0];
             let status_area = outer[1];
+
+            let search_opt = if search_state.active {
+                Some(&*search_state)
+            } else {
+                None
+            };
 
             if toc_state.visible {
                 let cols = Layout::horizontal([
@@ -91,14 +103,14 @@ fn run_app(
 
                 TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
 
-                if let Err(e) = pdf_state.update_image(document, Some(link_state)) {
+                if let Err(e) = pdf_state.update_image(document, Some(link_state), search_opt) {
                     let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, cols[1]);
                 } else {
                     frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
                 }
             } else {
-                if let Err(e) = pdf_state.update_image(document, Some(link_state)) {
+                if let Err(e) = pdf_state.update_image(document, Some(link_state), search_opt) {
                     let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                     frame.render_widget(msg, main_area);
                 } else {
@@ -106,8 +118,17 @@ fn run_app(
                 }
             }
 
-            // Status bar: show goto prompt if active, otherwise normal bar
-            if let Some(input) = goto_input.as_ref() {
+            // Status bar: show input prompts or normal bar
+            if let Some(input) = search_input.as_ref() {
+                let prompt = format!(" /{}█ ", input);
+                let line = Line::from(vec![Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(Color::Cyan))
+                    .render(status_area, frame.buffer_mut());
+            } else if let Some(input) = goto_input.as_ref() {
                 let prompt = format!(
                     " Go to page (1-{}): {}█ ",
                     pdf_state.page_count(),
@@ -125,6 +146,7 @@ fn run_app(
                     StatusBar {
                         state: &*pdf_state,
                         link_state: Some(&*link_state),
+                        search_state: Some(&*search_state),
                     },
                     status_area,
                 );
@@ -134,6 +156,43 @@ fn run_app(
         if event::poll(Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // Search input mode
+                if search_input.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            *search_input = None;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(input) = search_input.as_ref() {
+                                if !input.is_empty() {
+                                    let query = input.clone();
+                                    let _ = search_state.search(document, &query);
+                                    // Jump to first hit on or after current page
+                                    if search_state.active {
+                                        search_state.next_hit_from_page(pdf_state.current_page());
+                                        if let Some(hit) = search_state.current_hit() {
+                                            pdf_state.scroll_to_point(hit.page, hit.y0);
+                                        }
+                                    }
+                                }
+                            }
+                            *search_input = None;
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = search_input.as_mut() {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(input) = search_input.as_mut() {
+                                input.push(c);
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -201,7 +260,17 @@ fn run_app(
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => break,
+                        KeyCode::Char('q') => break,
+                        KeyCode::Esc => {
+                            if search_state.active {
+                                search_state.clear();
+                            } else {
+                                break;
+                            }
+                        }
+                        KeyCode::Char('/') => {
+                            *search_input = Some(String::new());
+                        }
                         KeyCode::Char('g') => {
                             *goto_input = Some(String::new());
                         }
@@ -219,12 +288,28 @@ fn run_app(
                                 pdf_state.global_scroll = pos.global_scroll;
                             }
                         }
-                        KeyCode::Char('n') | KeyCode::Right | KeyCode::PageDown => {
-                            pdf_state.next_page()
+                        KeyCode::Char('n') => {
+                            if search_state.active {
+                                search_state.next_hit();
+                                if let Some(hit) = search_state.current_hit() {
+                                    pdf_state.scroll_to_point(hit.page, hit.y0);
+                                }
+                            } else {
+                                pdf_state.next_page();
+                            }
+                        }
+                        KeyCode::Char('N') => {
+                            if search_state.active {
+                                search_state.prev_hit();
+                                if let Some(hit) = search_state.current_hit() {
+                                    pdf_state.scroll_to_point(hit.page, hit.y0);
+                                }
+                            }
                         }
                         KeyCode::Char('p') | KeyCode::Left | KeyCode::PageUp => {
                             pdf_state.prev_page()
                         }
+                        KeyCode::Right | KeyCode::PageDown => pdf_state.next_page(),
                         KeyCode::Char('j') | KeyCode::Down => pdf_state.scroll_down(3),
                         KeyCode::Char('k') | KeyCode::Up => pdf_state.scroll_up(3),
                         KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(),
