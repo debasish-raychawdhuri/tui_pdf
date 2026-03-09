@@ -310,8 +310,6 @@ fn run_app(
                         KeyCode::Esc => {
                             if search_state.active {
                                 search_state.clear();
-                            } else {
-                                break;
                             }
                         }
                         KeyCode::Char('/') => {
