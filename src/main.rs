@@ -119,7 +119,9 @@ fn run_app(
             }
         }
 
-        // Display: only reads from stripe PNG cache, never calls MuPDF
+        // Ensure current page is rendered before draw (avoids blank on uncached pages)
+        pdf_state.ensure_visible_rendered(document);
+
         terminal.draw(|frame| {
             let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
@@ -200,8 +202,16 @@ fn run_app(
             }
         })?;
 
-        // Short poll for input
-        if event::poll(Duration::from_millis(16))? {
+        // Poll for input: short timeout when there's active work, long when idle
+        let busy = search_state.searching
+            || !pdf_state.prerender_done()
+            || status_message.is_some();
+        let poll_timeout = if busy {
+            Duration::from_millis(16)
+        } else {
+            Duration::from_secs(1)
+        };
+        if event::poll(poll_timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;

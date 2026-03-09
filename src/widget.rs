@@ -241,9 +241,13 @@ impl PdfViewState {
     }
 
     /// Build a pre-render queue that spirals outward from `center_page`.
+    /// Limited to a window around center to avoid thrashing the cache.
     fn build_prerender_queue(&mut self, center_page: usize) {
         self.prerender_queue.clear();
         self.prerender_pos = 0;
+
+        // Pre-render up to 30 pages around center (fits comfortably in cache)
+        const MAX_PRERENDER: usize = 30;
 
         let center = center_page.min(self.page_count.saturating_sub(1));
         let mut left = center as isize;
@@ -251,7 +255,7 @@ impl PdfViewState {
         // Add center first
         self.prerender_queue.push(center);
 
-        loop {
+        while self.prerender_queue.len() < MAX_PRERENDER {
             let mut added = false;
             if left > 0 {
                 left -= 1;
@@ -372,6 +376,34 @@ impl PdfViewState {
         self.build_prerender_queue(current);
 
         Ok(())
+    }
+
+    /// Ensure the current visible pages are rendered and cached.
+    /// Call before draw to avoid blank pages when scrolling to uncached regions.
+    pub fn ensure_visible_rendered(&mut self, document: &Document) {
+        let cache_key = self.cache_key();
+        let font_height = self.picker.font_size().1 as u32;
+        if font_height == 0 {
+            return;
+        }
+        let current = self.current_page();
+        let mut refocus = false;
+        for page_idx in current..(current + 2).min(self.page_count) {
+            if self.cache.get(page_idx, cache_key).is_none() {
+                if let Ok(mut img) = render_page_dpi(document, page_idx, self.zoom) {
+                    if self.inverted {
+                        img.invert();
+                    }
+                    let stripe_images = split_into_stripes(&img, font_height);
+                    let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+                    self.cache.insert(page_idx, cache_key, stripe_pngs);
+                    refocus = true;
+                }
+            }
+        }
+        if refocus {
+            self.build_prerender_queue(current);
+        }
     }
 
     /// Display path: build protocols from cached stripe PNGs only.
