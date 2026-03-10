@@ -1,5 +1,6 @@
 use std::fs;
-use std::io::{self, stdout};
+use std::io::{self, stdout, BufRead, BufReader, Write};
+use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -17,14 +18,27 @@ use ratatui_image::picker::Picker;
 
 use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
-    synctex_edit, jump_to_neovim,
+    send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
 };
 
 fn main() -> io::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: tui-pdf <path-to-pdf>");
+        eprintln!("Usage: tui-pdf [--forward line:col:file] <path-to-pdf>");
         std::process::exit(1);
+    }
+
+    // Handle --forward: send command to running instance and exit
+    if args.len() >= 4 && args[1] == "--forward" {
+        let pdf_path = std::path::Path::new(&args[3]);
+        let sock = socket_path(pdf_path);
+        let message = format!("forward:{}", args[2]);
+        if send_forward(&sock, &message) {
+            std::process::exit(0);
+        } else {
+            eprintln!("No running tui-pdf instance for this PDF");
+            std::process::exit(1);
+        }
     }
 
     let pdf_path = &args[1];
@@ -52,6 +66,14 @@ fn main() -> io::Result<()> {
     let mut goto_input: Option<String> = None;
     let mut search_input: Option<String> = None;
 
+    // Create Unix socket for forward search commands
+    let sock = socket_path(document.path());
+    let _ = fs::remove_file(&sock); // clean up stale socket
+    let listener = UnixListener::bind(&sock).ok();
+    if let Some(ref l) = listener {
+        l.set_nonblocking(true).ok();
+    }
+
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
 
@@ -67,10 +89,14 @@ fn main() -> io::Result<()> {
         &mut search_state,
         &mut goto_input,
         &mut search_input,
+        listener.as_ref(),
     );
 
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
+
+    // Clean up socket
+    let _ = fs::remove_file(&sock);
 
     if let Err(e) = result {
         eprintln!("Error: {e}");
@@ -89,6 +115,7 @@ fn run_app(
     search_state: &mut SearchState,
     goto_input: &mut Option<String>,
     search_input: &mut Option<String>,
+    listener: Option<&UnixListener>,
 ) -> io::Result<()> {
     // Auto-reload state
     let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
@@ -116,6 +143,45 @@ fn run_app(
         if let Some((_, created)) = &status_message {
             if created.elapsed() > Duration::from_secs(3) {
                 status_message = None;
+            }
+        }
+
+        // Check for forward search commands from the socket
+        if let Some(l) = listener {
+            while let Ok((stream, _)) = l.accept() {
+                let mut reader = BufReader::new(&stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).is_ok() {
+                    let line = line.trim();
+                    if let Some(rest) = line.strip_prefix("forward:") {
+                        // Parse "line:col:file"
+                        let parts: Vec<&str> = rest.splitn(3, ':').collect();
+                        if parts.len() == 3 {
+                            if let (Ok(src_line), Ok(col)) =
+                                (parts[0].parse::<usize>(), parts[1].parse::<usize>())
+                            {
+                                let tex_file = parts[2];
+                                if let Some(fwd) =
+                                    synctex_view(document.path(), tex_file, src_line, col)
+                                {
+                                    pdf_state.scroll_to_point(fwd.page, fwd.y);
+                                    status_message = Some((
+                                        format!("Forward: {}:{}", tex_file, src_line),
+                                        Instant::now(),
+                                    ));
+                                } else {
+                                    status_message = Some((
+                                        "Forward search: no result".to_string(),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    // Send ack
+                    let mut stream = stream;
+                    let _ = writeln!(stream, "ok");
+                }
             }
         }
 

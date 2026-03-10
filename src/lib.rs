@@ -12,6 +12,6 @@ pub use error::{Result, TuiPdfError};
 pub use links::LinkState;
 pub use renderer::{compute_stripe_count, render_page, render_page_dpi, split_into_stripes, StripeCache};
 pub use search::SearchState;
-pub use synctex::{jump_to_neovim, synctex_edit, SyncTexResult};
+pub use synctex::{jump_to_neovim, send_forward, socket_path, synctex_edit, synctex_view, SyncTexResult, SyncTexForward};
 pub use toc::{TocState, TocWidget};
 pub use widget::{PdfViewState, PdfWidget, StatusBar};
