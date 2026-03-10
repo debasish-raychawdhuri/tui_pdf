@@ -497,8 +497,10 @@ fn run_app(
                         if last_mtime.map_or(true, |prev| mtime != prev) {
                             last_mtime = Some(mtime);
                             if document.reload().is_ok() {
+                                let saved_scroll = pdf_state.global_scroll;
                                 pdf_state.on_reload(document);
                                 let _ = pdf_state.initial_render(document);
+                                pdf_state.global_scroll = saved_scroll;
                                 // Clear search and link state
                                 search_state.clear();
                                 link_state.deactivate();
