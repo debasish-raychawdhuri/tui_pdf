@@ -3,7 +3,7 @@ use std::io::{self, stdout, BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant, SystemTime};
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
@@ -22,6 +22,11 @@ use tui_pdf::{
 };
 
 fn main() -> io::Result<()> {
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {info}\n\nBacktrace:\n{}", std::backtrace::Backtrace::force_capture());
+        let _ = std::fs::write("/tmp/tui-pdf-panic.log", &msg);
+    }));
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!("Usage: tui-pdf [--forward line:col:file] <path-to-pdf>");
@@ -76,6 +81,7 @@ fn main() -> io::Result<()> {
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
 
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -92,18 +98,14 @@ fn main() -> io::Result<()> {
         listener.as_ref(),
     );
 
-    disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
+    let _ = stdout().execute(DisableMouseCapture);
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
 
     // Clean up socket
     let _ = fs::remove_file(&sock);
 
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
-    }
-
-    Ok(())
+    result
 }
 
 fn run_app(
@@ -149,6 +151,7 @@ fn run_app(
         // Check for forward search commands from the socket
         if let Some(l) = listener {
             while let Ok((stream, _)) = l.accept() {
+                let _ = stream.set_nonblocking(false);
                 let mut reader = BufReader::new(&stream);
                 let mut line = String::new();
                 if reader.read_line(&mut line).is_ok() {
@@ -188,7 +191,7 @@ fn run_app(
         // Ensure current page is rendered before draw (avoids blank on uncached pages)
         pdf_state.ensure_visible_rendered(document);
 
-        terminal.draw(|frame| {
+        let draw_result = terminal.draw(|frame| {
             let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
 
@@ -266,7 +269,13 @@ fn run_app(
                     status_area,
                 );
             }
-        })?;
+        });
+        if let Err(e) = draw_result {
+            if e.kind() == io::ErrorKind::WouldBlock {
+                continue;
+            }
+            return Err(e);
+        }
 
         // Poll for input: short timeout when there's active work, long when idle
         let busy = search_state.searching
@@ -277,8 +286,44 @@ fn run_app(
         } else {
             Duration::from_secs(1)
         };
-        if event::poll(poll_timeout)? {
-            if let Event::Key(key) = event::read()? {
+        let poll_result = event::poll(poll_timeout);
+        if poll_result.is_err() {
+            continue;
+        }
+        if poll_result.unwrap() {
+            let ev = match event::read() {
+                Ok(ev) => ev,
+                Err(_) => continue,
+            };
+
+            // Handle mouse clicks: reverse search on left click
+            if let Event::Mouse(mouse) = ev {
+                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
+                    if let Some((page, pdf_x, pdf_y)) =
+                        pdf_state.terminal_to_pdf(mouse.row, mouse.column)
+                    {
+                        match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
+                            Some(result) => {
+                                if !jump_to_neovim(&result.file, result.line) {
+                                    status_message = Some((
+                                        format!("SyncTeX: {}:{}", result.file, result.line),
+                                        Instant::now(),
+                                    ));
+                                }
+                            }
+                            None => {
+                                status_message = Some((
+                                    "SyncTeX: no result at click".to_string(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
@@ -406,26 +451,6 @@ fn run_app(
                         KeyCode::Char('b') => {
                             if let Some(pos) = link_state.pop_position() {
                                 pdf_state.global_scroll = pos.global_scroll;
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            let (page, pdf_y) = pdf_state.current_pdf_position();
-                            let pdf_x = pdf_state.page_width_points(page) / 2.0;
-                            match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
-                                Some(result) => {
-                                    if !jump_to_neovim(&result.file, result.line) {
-                                        status_message = Some((
-                                            format!("SyncTeX: {}:{}", result.file, result.line),
-                                            Instant::now(),
-                                        ));
-                                    }
-                                }
-                                None => {
-                                    status_message = Some((
-                                        "SyncTeX: no result".to_string(),
-                                        Instant::now(),
-                                    ));
-                                }
                             }
                         }
                         KeyCode::Char('n') => {

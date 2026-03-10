@@ -47,6 +47,9 @@ pub struct PdfViewState {
     prerender_pos: usize,
 
     inverted: bool,
+
+    /// Last render area for terminal-to-PDF coordinate conversion.
+    pub last_render_area: Option<(u16, u16, u16, u16)>,
 }
 
 impl PdfViewState {
@@ -69,6 +72,7 @@ impl PdfViewState {
             prerender_queue: Vec::new(),
             prerender_pos: 0,
             inverted: false,
+            last_render_area: None,
         }
     }
 
@@ -211,6 +215,41 @@ impl PdfViewState {
             .copied()
             .unwrap_or(0) as f32
             / scale
+    }
+
+    /// Convert a terminal (row, col) position to PDF (page, x, y) coordinates.
+    pub fn terminal_to_pdf(&self, term_row: u16, term_col: u16) -> Option<(usize, f32, f32)> {
+        let (ax, ay, aw, _ah) = self.last_render_area?;
+        if term_col < ax || term_row < ay {
+            return None;
+        }
+        let screen_row = (term_row - ay) as usize;
+        let g = self.global_scroll + screen_row;
+        if g >= self.total_stripes {
+            return None;
+        }
+
+        let page_idx = match self.cumulative_stripes.binary_search(&g) {
+            Ok(i) => i,
+            Err(i) => i.saturating_sub(1),
+        };
+
+        let page_base = self.cumulative_stripes[page_idx];
+        let local_stripe = g - page_base;
+
+        let font_height = self.picker.font_size().1 as f32;
+        let font_width = self.picker.font_size().0 as f32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+
+        let pw = self.page_pixel_widths.get(page_idx).copied().unwrap_or(0) as u16;
+        let img_cols = if font_width > 0.0 { (pw + font_width as u16 - 1) / font_width as u16 } else { aw };
+        let x_offset = if img_cols < aw { (aw - img_cols) / 2 } else { 0 };
+
+        let col_in_page = (term_col - ax).saturating_sub(x_offset);
+        let pdf_x = (col_in_page as f32 * font_width) / scale;
+        let pdf_y = (local_stripe as f32 * font_height) / scale;
+
+        Some((page_idx, pdf_x, pdf_y))
     }
 
     fn recompute_geometry(&mut self, document: &Document) -> Result<()> {
@@ -634,6 +673,7 @@ impl StatefulWidget for PdfWidget {
     type State = PdfViewState;
 
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
+        state.last_render_area = Some((area.x, area.y, area.width, area.height));
         if state.total_stripes == 0 {
             return;
         }
@@ -743,7 +783,7 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | i: invert | l: links | t: toc | s: synctex{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | i: invert | l: links | t: toc{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,

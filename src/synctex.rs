@@ -59,9 +59,10 @@ pub fn jump_to_neovim(file: &str, line: usize) -> bool {
     let cmd = format!(":e +{line} {file}\r");
     Command::new("nvim")
         .args(["--server", &nvim_socket, "--remote-send", &cmd])
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .is_ok()
 }
 
 /// Run `synctex view` to find the PDF position for a source location.
