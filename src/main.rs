@@ -296,10 +296,10 @@ fn run_app(
                 Err(_) => continue,
             };
 
-            // Handle mouse clicks: reverse search on left click
+            // Handle mouse events
             if let Event::Mouse(mouse) = ev {
                 match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
+                    MouseEventKind::Down(MouseButton::Left) if mouse.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
                         if let Some((page, pdf_x, pdf_y)) =
                             pdf_state.terminal_to_pdf(mouse.row, mouse.column)
                         {
