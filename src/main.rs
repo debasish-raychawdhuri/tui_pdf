@@ -298,27 +298,32 @@ fn run_app(
 
             // Handle mouse clicks: reverse search on left click
             if let Event::Mouse(mouse) = ev {
-                if let MouseEventKind::Down(MouseButton::Left) = mouse.kind {
-                    if let Some((page, pdf_x, pdf_y)) =
-                        pdf_state.terminal_to_pdf(mouse.row, mouse.column)
-                    {
-                        match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
-                            Some(result) => {
-                                if !jump_to_neovim(&result.file, result.line) {
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if let Some((page, pdf_x, pdf_y)) =
+                            pdf_state.terminal_to_pdf(mouse.row, mouse.column)
+                        {
+                            match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
+                                Some(result) => {
+                                    if !jump_to_neovim(&result.file, result.line) {
+                                        status_message = Some((
+                                            format!("SyncTeX: {}:{}", result.file, result.line),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                                None => {
                                     status_message = Some((
-                                        format!("SyncTeX: {}:{}", result.file, result.line),
+                                        "SyncTeX: no result at click".to_string(),
                                         Instant::now(),
                                     ));
                                 }
                             }
-                            None => {
-                                status_message = Some((
-                                    "SyncTeX: no result at click".to_string(),
-                                    Instant::now(),
-                                ));
-                            }
                         }
                     }
+                    MouseEventKind::ScrollUp => pdf_state.scroll_up(5),
+                    MouseEventKind::ScrollDown => pdf_state.scroll_down(5),
+                    _ => {}
                 }
                 continue;
             }
