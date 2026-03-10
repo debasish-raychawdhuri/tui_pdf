@@ -15,7 +15,11 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Zoom** — adjustable zoom level with immediate re-render (`+`/`-`)
 - **Go to page** — jump directly to any page number (`g`)
 - **Background pre-rendering** — pages are rendered and cached in the background during idle time, so scrolling through large documents is instant
-- **Efficient caching** — stripe PNG cache with 1 GB LRU eviction; a 1000-page PDF uses ~500 MB of cache
+- **Efficient caching** — stripe PNG cache with 100 MB LRU eviction
+- **Auto-reload** — detects file changes and reloads automatically, preserving scroll position (great for LaTeX workflows)
+- **SyncTeX reverse search** — Ctrl+Click on the PDF to jump to the corresponding source line in neovim (requires `synctex` CLI and `$NVIM` socket)
+- **SyncTeX forward search** — integrates with texlab LSP to scroll the PDF to the source position (`tui-pdf --forward line:col:file doc.pdf`)
+- **Mouse wheel scrolling** — scroll through the document with the mouse wheel
 
 ## Requirements
 
@@ -68,6 +72,9 @@ cargo build --release
 
 ```bash
 tui-pdf <path-to-pdf>
+
+# Forward search (send from editor to a running instance):
+tui-pdf --forward line:col:texfile path-to-pdf
 ```
 
 ### Keybindings
@@ -91,7 +98,10 @@ tui-pdf <path-to-pdf>
 | `l` | Enter link mode |
 | `Enter` (in link mode) | Follow selected link |
 | `b` | Go back (after following a link) |
+| `i` | Toggle color inversion |
 | `q` / `Esc` | Quit |
+| Mouse wheel | Scroll up/down |
+| Ctrl+Click | SyncTeX reverse search (jump to source in neovim) |
 
 ### Search
 
@@ -100,6 +110,18 @@ Press `/` to open the search prompt, type your query, and press `Enter`. The vie
 ### Links
 
 Press `l` to activate link mode on the current page. Internal links are highlighted in blue, with the selected link in yellow. Use `j`/`k` to select a link, `Enter` to follow it. Press `b` at any time to jump back to where you were before following a link.
+
+### SyncTeX integration
+
+tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
+
+**Reverse search (PDF → source):** Ctrl+Click anywhere on the PDF. If `synctex` is installed and your PDF was compiled with `-synctex=1`, it jumps to the corresponding source line in a running neovim instance (via the `$NVIM` socket).
+
+**Forward search (source → PDF):** Configure your LSP (e.g. texlab) to use `tui-pdf --forward "%l:1:%f" "%p"` as the forward search command. When triggered from your editor, the running tui-pdf instance scrolls to the corresponding PDF position.
+
+**Auto-reload:** When the PDF file changes on disk (e.g. after recompiling LaTeX), tui-pdf automatically reloads it while preserving your scroll position.
+
+**Requirements:** `synctex` CLI tool (usually bundled with TeX distributions), PDF compiled with `pdflatex -synctex=1`, and `$NVIM` environment variable set for reverse search to jump to neovim.
 
 ## Library usage
 
