@@ -487,6 +487,7 @@ fn run_app(
                         KeyCode::Char('i') => pdf_state.toggle_invert(document),
                         KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(document),
                         KeyCode::Char('-') => pdf_state.zoom_out(document),
+                        KeyCode::Char('w') => pdf_state.fit_width(document),
                         KeyCode::Home => pdf_state.first_page(),
                         KeyCode::End => pdf_state.last_page(),
                         _ => {}

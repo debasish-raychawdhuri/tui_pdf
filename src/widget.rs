@@ -146,6 +146,19 @@ impl PdfViewState {
         self.on_zoom_change(document);
     }
 
+    pub fn fit_width(&mut self, document: &Document) {
+        let (_, _, aw, _) = self.last_render_area.unwrap_or((0, 0, 80, 24));
+        let font_width = self.picker.font_size().0 as f32;
+        let terminal_px = aw as f32 * font_width;
+        let page = self.current_page();
+        if let Ok((page_w, _)) = document.page_size(page) {
+            let dpi_scale = crate::renderer::DEFAULT_DPI / 72.0;
+            let new_zoom = terminal_px / (page_w * dpi_scale);
+            self.zoom = new_zoom.clamp(0.25, 5.0);
+            self.on_zoom_change(document);
+        }
+    }
+
     fn cache_key(&self) -> u32 {
         let k = (self.zoom * 100.0) as u32;
         if self.inverted { k | (1 << 31) } else { k }
@@ -783,7 +796,7 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | i: invert | l: links | t: toc{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | w: fit width | i: invert | l: links | t: toc{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,
