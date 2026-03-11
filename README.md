@@ -111,6 +111,7 @@ tui-pdf --forward line:col:texfile path-to-pdf
 | `i` | Toggle color inversion |
 | `o` | Open Zotero browser |
 | `Tab` | Switch between open documents |
+| `x` | Close current document |
 | `q` / `Esc` | Quit |
 | Mouse wheel | Scroll up/down |
 | Ctrl+Click | SyncTeX reverse search (jump to source in neovim) |

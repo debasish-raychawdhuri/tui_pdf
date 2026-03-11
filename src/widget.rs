@@ -796,7 +796,7 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | w: fit | i: invert | l: links | t: toc | o: zotero | Tab: switch{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | w: fit | i: invert | l: links | t: toc | o: zotero | Tab: switch | x: close{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,

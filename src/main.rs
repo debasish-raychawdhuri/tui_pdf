@@ -27,6 +27,7 @@ enum AppAction {
     Quit,
     OpenZotero,
     SwitchDoc(usize),
+    CloseDoc,
 }
 
 struct OpenDoc {
@@ -226,6 +227,19 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
                 if idx < open_docs.len() {
                     current_path = open_docs[idx].path.clone();
                 }
+            }
+            Ok(AppAction::CloseDoc) => {
+                if open_docs.len() <= 1 {
+                    break; // last doc, quit
+                }
+                open_docs.remove(current_idx);
+                let switch_to = if current_idx >= open_docs.len() {
+                    open_docs.len() - 1
+                } else {
+                    current_idx
+                };
+                current_path = open_docs[switch_to].path.clone();
+                current_idx = switch_to;
             }
             Err(e) => {
                 let _ = stdout().execute(DisableMouseCapture);
@@ -569,6 +583,7 @@ fn run_app(
                 } else {
                     match key.code {
                         KeyCode::Char('q') => return Ok(AppAction::Quit),
+                        KeyCode::Char('x') => return Ok(AppAction::CloseDoc),
                         KeyCode::Char('o') => return Ok(AppAction::OpenZotero),
                         KeyCode::Tab => {
                             if open_docs.len() > 1 {
