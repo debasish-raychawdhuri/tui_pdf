@@ -18,6 +18,7 @@ use ratatui_image::picker::Picker;
 
 use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
+    ZoteroLibrary, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
 };
 
@@ -29,7 +30,7 @@ fn main() -> io::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: tui-pdf [--forward line:col:file] <path-to-pdf>");
+        eprintln!("Usage: tui-pdf [--forward line:col:file] [--setup-zotero <dir>] [--zotero] <path-to-pdf>");
         std::process::exit(1);
     }
 
@@ -46,7 +47,54 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Handle --setup-zotero: save Zotero directory to config
+    if args.len() >= 3 && args[1] == "--setup-zotero" {
+        let dir = &args[2];
+        let path = std::path::Path::new(dir);
+        if !path.join("zotero.sqlite").exists() {
+            eprintln!("Error: {}/zotero.sqlite not found", dir);
+            std::process::exit(1);
+        }
+        let mut config = load_config();
+        config.zotero_dir = Some(dir.to_string());
+        save_config(&config).unwrap_or_else(|e| {
+            eprintln!("Failed to save config: {e}");
+            std::process::exit(1);
+        });
+        eprintln!("Zotero directory saved. You can now use: tui-pdf --zotero");
+        std::process::exit(0);
+    }
+
+    // Handle --zotero: browse Zotero library and open selected PDF
+    if args.len() >= 2 && args[1] == "--zotero" {
+        let config = load_config();
+        let zotero_dir = config.zotero_dir.unwrap_or_else(|| {
+            eprintln!("No Zotero directory configured. Run: tui-pdf --setup-zotero <dir>");
+            std::process::exit(1);
+        });
+        let library = load_library(std::path::Path::new(&zotero_dir)).unwrap_or_else(|e| {
+            eprintln!("Failed to load Zotero library: {e}");
+            std::process::exit(1);
+        });
+        if library.entries.is_empty() {
+            eprintln!("No PDF entries found in Zotero library.");
+            std::process::exit(1);
+        }
+        match run_zotero_browser(&library) {
+            Ok(Some(pdf_path)) => return open_viewer(&pdf_path.to_string_lossy()),
+            Ok(None) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("Browser error: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     let pdf_path = &args[1];
+    open_viewer(pdf_path)
+}
+
+fn open_viewer(pdf_path: &str) -> io::Result<()> {
 
     let mut document = Document::open(pdf_path).unwrap_or_else(|e| {
         eprintln!("Failed to open PDF: {e}");
@@ -535,4 +583,225 @@ fn run_app(
     }
 
     Ok(())
+}
+
+/// A row in the Zotero browser: either a collection (folder) or a paper.
+enum BrowserItem {
+    Collection { id: i64, name: String },
+    Paper { entry_idx: usize },
+}
+
+fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::PathBuf>> {
+    let mut filter = String::new();
+    let mut selected: usize = 0;
+    // Stack of collection IDs we've navigated into (None = root)
+    let mut path_stack: Vec<Option<i64>> = vec![None];
+
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = loop {
+        let current_collection = *path_stack.last().unwrap();
+
+        // Build the list of items to display
+        let mut items: Vec<BrowserItem> = Vec::new();
+
+        if filter.is_empty() {
+            // Show subcollections first, then papers in this collection
+            let mut children = library.child_collections(current_collection);
+            children.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            for c in children {
+                items.push(BrowserItem::Collection { id: c.id, name: c.name.clone() });
+            }
+
+            let paper_indices = if current_collection.is_none() {
+                // At root: show all papers
+                (0..library.entries.len()).collect::<Vec<_>>()
+            } else {
+                library.entries_in_collection(current_collection.unwrap())
+            };
+            for idx in paper_indices {
+                items.push(BrowserItem::Paper { entry_idx: idx });
+            }
+        } else {
+            // When filtering, search across all papers regardless of collection
+            let lower = filter.to_lowercase();
+            for (i, e) in library.entries.iter().enumerate() {
+                if e.title.to_lowercase().contains(&lower)
+                    || e.authors.to_lowercase().contains(&lower)
+                    || e.year.contains(&lower)
+                {
+                    items.push(BrowserItem::Paper { entry_idx: i });
+                }
+            }
+        }
+
+        if selected >= items.len() {
+            selected = items.len().saturating_sub(1);
+        }
+
+        // Build breadcrumb path
+        let breadcrumb = {
+            let mut parts = vec!["Library".to_string()];
+            for cid in path_stack.iter().skip(1) {
+                if let Some(id) = cid {
+                    if let Some(c) = library.collections.iter().find(|c| c.id == *id) {
+                        parts.push(c.name.clone());
+                    }
+                }
+            }
+            parts.join(" > ")
+        };
+
+        terminal.draw(|frame| {
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // breadcrumb / search
+                Constraint::Min(1),   // list
+                Constraint::Length(1), // status
+            ])
+            .split(frame.area());
+
+            // Top bar: breadcrumb or search
+            if filter.is_empty() {
+                Paragraph::new(Line::from(vec![Span::styled(
+                    format!(" {}", breadcrumb),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )]))
+                .style(Style::default().bg(Color::Cyan))
+                .render(chunks[0], frame.buffer_mut());
+            } else {
+                Paragraph::new(Line::from(vec![Span::styled(
+                    format!(" /{}█", filter),
+                    Style::default().fg(Color::Black).bg(Color::Cyan),
+                )]))
+                .style(Style::default().bg(Color::Cyan))
+                .render(chunks[0], frame.buffer_mut());
+            }
+
+            // List
+            let list_height = chunks[1].height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected - list_height + 1
+            } else {
+                0
+            };
+
+            for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
+                let is_selected = scroll_offset + row == selected;
+                let width = chunks[1].width as usize;
+
+                let text = match item {
+                    BrowserItem::Collection { name, .. } => {
+                        format!("[{}]", name)
+                    }
+                    BrowserItem::Paper { entry_idx } => {
+                        let e = &library.entries[*entry_idx];
+                        let year_part = if e.year.is_empty() { String::new() } else { format!(" ({})", e.year) };
+                        let author_part = if e.authors.is_empty() { String::new() } else { format!(" — {}", e.authors) };
+                        format!("  {}{}{}", e.title, author_part, year_part)
+                    }
+                };
+
+                let truncated = if text.len() > width {
+                    format!("{}…", &text[..width.saturating_sub(1)])
+                } else {
+                    text
+                };
+
+                let style = match (is_selected, item) {
+                    (true, _) => Style::default().fg(Color::Black).bg(Color::White),
+                    (false, BrowserItem::Collection { .. }) => Style::default().fg(Color::Yellow),
+                    (false, BrowserItem::Paper { .. }) => Style::default().fg(Color::White),
+                };
+
+                let area = ratatui::layout::Rect {
+                    x: chunks[1].x,
+                    y: chunks[1].y + row as u16,
+                    width: chunks[1].width,
+                    height: 1,
+                };
+                Paragraph::new(Span::styled(truncated, style))
+                    .style(style)
+                    .render(area, frame.buffer_mut());
+            }
+
+            // Status bar
+            let coll_count = items.iter().filter(|i| matches!(i, BrowserItem::Collection { .. })).count();
+            let paper_count = items.len() - coll_count;
+            let status = format!(
+                " {} collections, {} papers | /: search | Enter: open | Backspace: back | Esc: quit ",
+                coll_count, paper_count,
+            );
+            Paragraph::new(Line::from(vec![Span::styled(
+                status,
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            )]))
+            .style(Style::default().bg(Color::DarkGray))
+            .render(chunks[2], frame.buffer_mut());
+        })?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        if !filter.is_empty() {
+                            filter.clear();
+                            selected = 0;
+                        } else {
+                            break None;
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(item) = items.get(selected) {
+                            match item {
+                                BrowserItem::Collection { id, .. } => {
+                                    path_stack.push(Some(*id));
+                                    selected = 0;
+                                    filter.clear();
+                                }
+                                BrowserItem::Paper { entry_idx } => {
+                                    break Some(library.entries[*entry_idx].pdf_path.clone());
+                                }
+                            }
+                        }
+                    }
+                    KeyCode::Backspace => {
+                        if !filter.is_empty() {
+                            filter.pop();
+                            selected = 0;
+                        } else if path_stack.len() > 1 {
+                            path_stack.pop();
+                            selected = 0;
+                        }
+                    }
+                    KeyCode::Up => {
+                        selected = selected.saturating_sub(1);
+                    }
+                    KeyCode::Down => {
+                        if !items.is_empty() {
+                            selected = (selected + 1).min(items.len() - 1);
+                        }
+                    }
+                    KeyCode::Char('/') if filter.is_empty() => {
+                        // Enter search mode - just start accepting characters
+                        // The filter is already empty, typing will populate it
+                    }
+                    KeyCode::Char(c) => {
+                        filter.push(c);
+                        selected = 0;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
+    Ok(result)
 }
