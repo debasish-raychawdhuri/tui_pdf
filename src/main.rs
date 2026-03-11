@@ -16,11 +16,24 @@ use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
+
 use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
     ZoteroLibrary, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
 };
+
+enum AppAction {
+    Quit,
+    OpenZotero,
+    SwitchDoc(usize),
+}
+
+struct OpenDoc {
+    path: String,
+    scroll: usize,
+    zoom: f32,
+}
 
 fn main() -> io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
@@ -95,37 +108,14 @@ fn main() -> io::Result<()> {
 }
 
 fn open_viewer(pdf_path: &str) -> io::Result<()> {
+    let mut open_docs: Vec<OpenDoc> = Vec::new();
+    let mut current_idx: usize = 0;
+    let mut current_path = pdf_path.to_string();
 
-    let mut document = Document::open(pdf_path).unwrap_or_else(|e| {
-        eprintln!("Failed to open PDF: {e}");
-        std::process::exit(1);
-    });
-
-    let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
-    picker.set_background_color([0, 0, 0, 255]);
-
-    let mut pdf_state = PdfViewState::new(document.page_count(), picker);
-
-    // Render first 2 pages immediately so the PDF shows right away
-    pdf_state.initial_render(&document).unwrap_or_else(|e| {
-        eprintln!("Failed to render PDF: {e}");
-        std::process::exit(1);
-    });
-
-    let outlines = document.outlines().unwrap_or_default();
-    let mut toc_state = TocState::new(&outlines);
-    let mut link_state = LinkState::new();
-    let mut search_state = SearchState::new();
-    let mut goto_input: Option<String> = None;
-    let mut search_input: Option<String> = None;
-
-    // Create Unix socket for forward search commands
-    let sock = socket_path(document.path());
-    let _ = fs::remove_file(&sock); // clean up stale socket
-    let listener = UnixListener::bind(&sock).ok();
-    if let Some(ref l) = listener {
-        l.set_nonblocking(true).ok();
-    }
+    // Load Zotero library lazily
+    let zotero_library: Option<ZoteroLibrary> = load_config()
+        .zotero_dir
+        .and_then(|dir| load_library(std::path::Path::new(&dir)).ok());
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -134,26 +124,122 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_app(
-        &mut terminal,
-        &mut document,
-        &mut pdf_state,
-        &mut toc_state,
-        &mut link_state,
-        &mut search_state,
-        &mut goto_input,
-        &mut search_input,
-        listener.as_ref(),
-    );
+    loop {
+        // Save current doc state if we have one open
+        if let Some(doc) = open_docs.get_mut(current_idx) {
+            // scroll/zoom already saved on switch
+            let _ = doc;
+        }
+
+        // Find or create entry for current path
+        let existing = open_docs.iter().position(|d| d.path == current_path);
+        current_idx = match existing {
+            Some(i) => i,
+            None => {
+                open_docs.push(OpenDoc {
+                    path: current_path.clone(),
+                    scroll: 0,
+                    zoom: 1.0,
+                });
+                open_docs.len() - 1
+            }
+        };
+        let saved_scroll = open_docs[current_idx].scroll;
+        let saved_zoom = open_docs[current_idx].zoom;
+
+        let mut document = match Document::open(&current_path) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!("Failed to open PDF: {e}");
+                break;
+            }
+        };
+
+        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
+        picker.set_background_color([0, 0, 0, 255]);
+
+        let mut pdf_state = PdfViewState::new(document.page_count(), picker);
+        pdf_state.zoom = saved_zoom;
+        let _ = pdf_state.initial_render(&document);
+        pdf_state.global_scroll = saved_scroll;
+
+        let outlines = document.outlines().unwrap_or_default();
+        let mut toc_state = TocState::new(&outlines);
+        let mut link_state = LinkState::new();
+        let mut search_state = SearchState::new();
+        let mut goto_input: Option<String> = None;
+        let mut search_input: Option<String> = None;
+
+        let sock = socket_path(document.path());
+        let _ = fs::remove_file(&sock);
+        let listener = UnixListener::bind(&sock).ok();
+        if let Some(ref l) = listener {
+            l.set_nonblocking(true).ok();
+        }
+
+        let result = run_app(
+            &mut terminal,
+            &mut document,
+            &mut pdf_state,
+            &mut toc_state,
+            &mut link_state,
+            &mut search_state,
+            &mut goto_input,
+            &mut search_input,
+            listener.as_ref(),
+            &open_docs,
+            current_idx,
+        );
+
+        let _ = fs::remove_file(&sock);
+
+        // Save position before switching
+        open_docs[current_idx].scroll = pdf_state.global_scroll;
+        open_docs[current_idx].zoom = pdf_state.zoom;
+
+        match result {
+            Ok(AppAction::Quit) => break,
+            Ok(AppAction::OpenZotero) => {
+                if let Some(ref lib) = zotero_library {
+                    // Temporarily leave alternate screen for the browser
+                    let _ = stdout().execute(DisableMouseCapture);
+                    let _ = stdout().execute(LeaveAlternateScreen);
+                    let _ = disable_raw_mode();
+
+                    match run_zotero_browser(lib) {
+                        Ok(Some(path)) => {
+                            current_path = path.to_string_lossy().to_string();
+                        }
+                        _ => {
+                            // User cancelled, reopen same doc
+                        }
+                    }
+
+                    enable_raw_mode()?;
+                    stdout().execute(EnterAlternateScreen)?;
+                    stdout().execute(EnableMouseCapture)?;
+                } else {
+                    // No Zotero configured — just continue
+                }
+            }
+            Ok(AppAction::SwitchDoc(idx)) => {
+                if idx < open_docs.len() {
+                    current_path = open_docs[idx].path.clone();
+                }
+            }
+            Err(e) => {
+                let _ = stdout().execute(DisableMouseCapture);
+                let _ = disable_raw_mode();
+                let _ = stdout().execute(LeaveAlternateScreen);
+                return Err(e);
+            }
+        }
+    }
 
     let _ = stdout().execute(DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = stdout().execute(LeaveAlternateScreen);
-
-    // Clean up socket
-    let _ = fs::remove_file(&sock);
-
-    result
+    Ok(())
 }
 
 fn run_app(
@@ -166,7 +252,9 @@ fn run_app(
     goto_input: &mut Option<String>,
     search_input: &mut Option<String>,
     listener: Option<&UnixListener>,
-) -> io::Result<()> {
+    open_docs: &[OpenDoc],
+    current_idx: usize,
+) -> io::Result<AppAction> {
     // Auto-reload state
     let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
         .and_then(|m| m.modified())
@@ -480,7 +568,14 @@ fn run_app(
                     }
                 } else {
                     match key.code {
-                        KeyCode::Char('q') => break,
+                        KeyCode::Char('q') => return Ok(AppAction::Quit),
+                        KeyCode::Char('o') => return Ok(AppAction::OpenZotero),
+                        KeyCode::Tab => {
+                            if open_docs.len() > 1 {
+                                let next = (current_idx + 1) % open_docs.len();
+                                return Ok(AppAction::SwitchDoc(next));
+                            }
+                        }
                         KeyCode::Esc => {
                             if search_state.active {
                                 search_state.clear();
@@ -582,7 +677,8 @@ fn run_app(
         }
     }
 
-    Ok(())
+    #[allow(unreachable_code)]
+    Ok(AppAction::Quit)
 }
 
 /// A row in the Zotero browser: either a collection (folder) or a paper.
