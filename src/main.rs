@@ -112,6 +112,7 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
     let mut open_docs: Vec<OpenDoc> = Vec::new();
     let mut current_idx: usize = 0;
     let mut current_path = pdf_path.to_string();
+    let mut inverted = false;
 
     // Load Zotero library lazily
     let zotero_library: Option<ZoteroLibrary> = load_config()
@@ -161,6 +162,7 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
 
         let mut pdf_state = PdfViewState::new(document.page_count(), picker);
         pdf_state.zoom = saved_zoom;
+        if inverted { pdf_state.toggle_invert(&document); }
         let _ = pdf_state.initial_render(&document);
         pdf_state.global_scroll = saved_scroll;
 
@@ -194,9 +196,10 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
 
         let _ = fs::remove_file(&sock);
 
-        // Save position before switching
+        // Save state before switching
         open_docs[current_idx].scroll = pdf_state.global_scroll;
         open_docs[current_idx].zoom = pdf_state.zoom;
+        inverted = pdf_state.inverted();
 
         match result {
             Ok(AppAction::Quit) => break,
