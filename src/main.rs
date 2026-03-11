@@ -113,11 +113,7 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
     let mut current_idx: usize = 0;
     let mut current_path = pdf_path.to_string();
     let mut inverted = false;
-
-    // Load Zotero library lazily
-    let zotero_library: Option<ZoteroLibrary> = load_config()
-        .zotero_dir
-        .and_then(|dir| load_library(std::path::Path::new(&dir)).ok());
+    let zotero_dir: Option<String> = load_config().zotero_dir;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -204,26 +200,24 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
         match result {
             Ok(AppAction::Quit) => break,
             Ok(AppAction::OpenZotero) => {
-                if let Some(ref lib) = zotero_library {
-                    // Temporarily leave alternate screen for the browser
-                    let _ = stdout().execute(DisableMouseCapture);
-                    let _ = stdout().execute(LeaveAlternateScreen);
-                    let _ = disable_raw_mode();
+                if let Some(ref dir) = zotero_dir {
+                    // Reload library fresh from DB each time
+                    if let Ok(lib) = load_library(std::path::Path::new(dir)) {
+                        let _ = stdout().execute(DisableMouseCapture);
+                        let _ = stdout().execute(LeaveAlternateScreen);
+                        let _ = disable_raw_mode();
 
-                    match run_zotero_browser(lib) {
-                        Ok(Some(path)) => {
-                            current_path = path.to_string_lossy().to_string();
+                        match run_zotero_browser(&lib) {
+                            Ok(Some(path)) => {
+                                current_path = path.to_string_lossy().to_string();
+                            }
+                            _ => {}
                         }
-                        _ => {
-                            // User cancelled, reopen same doc
-                        }
+
+                        enable_raw_mode()?;
+                        stdout().execute(EnterAlternateScreen)?;
+                        stdout().execute(EnableMouseCapture)?;
                     }
-
-                    enable_raw_mode()?;
-                    stdout().execute(EnterAlternateScreen)?;
-                    stdout().execute(EnableMouseCapture)?;
-                } else {
-                    // No Zotero configured — just continue
                 }
             }
             Ok(AppAction::SwitchDoc(idx)) => {
