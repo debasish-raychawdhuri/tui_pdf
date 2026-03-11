@@ -19,7 +19,7 @@ use ratatui_image::picker::Picker;
 
 use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
-    ZoteroLibrary, load_config, load_library, save_config,
+    ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
 };
 
@@ -28,6 +28,7 @@ enum AppAction {
     OpenZotero,
     SwitchDoc(usize),
     CloseDoc,
+    OpenLatest,
 }
 
 struct OpenDoc {
@@ -237,6 +238,13 @@ fn open_viewer(pdf_path: &str) -> io::Result<()> {
                 };
                 current_path = open_docs[switch_to].path.clone();
                 current_idx = switch_to;
+            }
+            Ok(AppAction::OpenLatest) => {
+                if let Some(ref dir) = zotero_dir {
+                    if let Some(path) = latest_pdf(std::path::Path::new(dir)) {
+                        current_path = path.to_string_lossy().to_string();
+                    }
+                }
             }
             Err(e) => {
                 let _ = stdout().execute(DisableMouseCapture);
@@ -647,6 +655,7 @@ fn run_app(
                         KeyCode::Char('q') => return Ok(AppAction::Quit),
                         KeyCode::Char('x') => return Ok(AppAction::CloseDoc),
                         KeyCode::Char('o') => return Ok(AppAction::OpenZotero),
+                        KeyCode::Char('O') => return Ok(AppAction::OpenLatest),
                         KeyCode::Tab => {
                             if open_docs.len() > 1 {
                                 let next = (current_idx + 1) % open_docs.len();

@@ -225,3 +225,44 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
         item_collections,
     })
 }
+
+/// Return the PDF path of the most recently added Zotero item.
+pub fn latest_pdf(zotero_dir: &Path) -> Option<PathBuf> {
+    let db_path = zotero_dir.join("zotero.sqlite");
+    let db_uri = format!("file:{}?immutable=1", db_path.display());
+    let conn = Connection::open_with_flags(
+        &db_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).ok()?;
+
+    let storage_dir = zotero_dir.join("storage");
+
+    // Find the most recently added parent item that has a stored PDF attachment
+    let mut stmt = conn.prepare(
+        "SELECT ia.path, att.key
+         FROM itemAttachments ia
+         JOIN items att ON att.itemID = ia.itemID
+         JOIN items parent ON parent.itemID = ia.parentItemID
+         WHERE ia.linkMode = 1
+           AND ia.contentType = 'application/pdf'
+           AND ia.parentItemID IS NOT NULL
+         ORDER BY parent.dateAdded DESC"
+    ).ok()?;
+
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }).ok()?;
+
+    for row in rows {
+        let (path, key) = row.ok()?;
+        let resolved = if let Some(filename) = path.strip_prefix("storage:") {
+            storage_dir.join(&key).join(filename)
+        } else {
+            PathBuf::from(&path)
+        };
+        if resolved.exists() {
+            return Some(resolved);
+        }
+    }
+    None
+}
