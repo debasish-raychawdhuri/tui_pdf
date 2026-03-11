@@ -278,6 +278,9 @@ fn run_app(
     // Status message (shown temporarily, expires after 3s)
     let mut status_message: Option<(String, Instant)> = None;
 
+    // Document picker state
+    let mut doc_picker: Option<usize> = None; // selected index
+
     loop {
         // Progress incremental search
         if search_state.searching {
@@ -348,33 +351,73 @@ fn run_app(
             let main_area = outer[0];
             let status_area = outer[1];
 
-            let search_opt = if search_state.active {
-                Some(&*search_state)
-            } else {
-                None
-            };
+            if doc_picker.is_some() {
+                // Document picker: render list in main area
+                let sel = doc_picker.unwrap();
+                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+                let title_area = ratatui::layout::Rect {
+                    x: main_area.x, y: main_area.y, width: main_area.width, height: 1,
+                };
+                Paragraph::new(Span::styled(" Open Documents ", title_style))
+                    .style(title_style)
+                    .render(title_area, frame.buffer_mut());
 
-            if toc_state.visible {
-                let cols = Layout::horizontal([
-                    Constraint::Percentage(30),
-                    Constraint::Percentage(70),
-                ])
-                .split(main_area);
-
-                TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
-
-                if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
-                    let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
-                    frame.render_widget(msg, cols[1]);
-                } else {
-                    frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
+                let list_height = (main_area.height as usize).saturating_sub(1);
+                for (i, doc) in open_docs.iter().enumerate().take(list_height) {
+                    let label = std::path::Path::new(&doc.path)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| doc.path.clone());
+                    let marker = if i == current_idx { "* " } else { "  " };
+                    let text = format!(" {}{}", marker, label);
+                    let width = main_area.width as usize;
+                    let truncated = if text.len() > width {
+                        format!("{}…", &text[..width - 1])
+                    } else {
+                        text
+                    };
+                    let style = if i == sel {
+                        Style::default().fg(Color::Black).bg(Color::White)
+                    } else {
+                        Style::default().fg(Color::White).bg(Color::Reset)
+                    };
+                    let area = ratatui::layout::Rect {
+                        x: main_area.x, y: main_area.y + 1 + i as u16,
+                        width: main_area.width, height: 1,
+                    };
+                    Paragraph::new(Span::styled(truncated, style))
+                        .style(style)
+                        .render(area, frame.buffer_mut());
                 }
             } else {
-                if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
-                    let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
-                    frame.render_widget(msg, main_area);
+                let search_opt = if search_state.active {
+                    Some(&*search_state)
                 } else {
-                    frame.render_stateful_widget(PdfWidget, main_area, pdf_state);
+                    None
+                };
+
+                if toc_state.visible {
+                    let cols = Layout::horizontal([
+                        Constraint::Percentage(30),
+                        Constraint::Percentage(70),
+                    ])
+                    .split(main_area);
+
+                    TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
+
+                    if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                        let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                        frame.render_widget(msg, cols[1]);
+                    } else {
+                        frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
+                    }
+                } else {
+                    if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                        let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                        frame.render_widget(msg, main_area);
+                    } else {
+                        frame.render_stateful_widget(PdfWidget, main_area, pdf_state);
+                    }
                 }
             }
 
@@ -480,6 +523,28 @@ fn run_app(
 
             if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // Document picker mode
+                if let Some(sel) = doc_picker.as_mut() {
+                    match key.code {
+                        KeyCode::Esc => { doc_picker = None; }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            if *sel + 1 < open_docs.len() { *sel += 1; }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            *sel = sel.saturating_sub(1);
+                        }
+                        KeyCode::Enter => {
+                            let idx = *sel;
+                            doc_picker = None;
+                            if idx != current_idx {
+                                return Ok(AppAction::SwitchDoc(idx));
+                            }
+                        }
+                        _ => {}
+                    }
                     continue;
                 }
 
@@ -590,6 +655,9 @@ fn run_app(
                                 let next = (current_idx + 1) % open_docs.len();
                                 return Ok(AppAction::SwitchDoc(next));
                             }
+                        }
+                        KeyCode::Char('d') => {
+                            doc_picker = Some(current_idx);
                         }
                         KeyCode::Esc => {
                             if search_state.active {
