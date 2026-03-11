@@ -12,7 +12,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Text search** — incremental search across the entire document with highlighted matches (`/` to search, `n`/`p` to navigate results)
 - **Table of contents** — side panel showing document outline with jump-to-page (`t`)
 - **Link navigation** — follow internal PDF links and navigate back (`l` to enter link mode, `b` to go back)
-- **Zoom** — adjustable zoom level with immediate re-render (`+`/`-`)
+- **Zoom** — adjustable zoom level with immediate re-render (`+`/`-`), fit-to-width (`w`)
 - **Go to page** — jump directly to any page number (`g`)
 - **Background pre-rendering** — pages are rendered and cached in the background during idle time, so scrolling through large documents is instant
 - **Efficient caching** — stripe PNG cache with 100 MB LRU eviction
@@ -20,6 +20,9 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **SyncTeX reverse search** — Ctrl+Click on the PDF to jump to the corresponding source line in neovim (requires `synctex` CLI and `$NVIM` socket)
 - **SyncTeX forward search** — integrates with texlab LSP to scroll the PDF to the source position (`tui-pdf --forward line:col:file doc.pdf`)
 - **Mouse wheel scrolling** — scroll through the document with the mouse wheel
+- **Fit to width** — resize zoom to fit the page width to the terminal (`w`)
+- **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer)
+- **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 
 ## Requirements
 
@@ -73,6 +76,12 @@ cargo build --release
 ```bash
 tui-pdf <path-to-pdf>
 
+# Browse Zotero library:
+tui-pdf --zotero
+
+# One-time Zotero setup (point to your Zotero data directory):
+tui-pdf --setup-zotero ~/Zotero
+
 # Forward search (send from editor to a running instance):
 tui-pdf --forward line:col:texfile path-to-pdf
 ```
@@ -98,7 +107,10 @@ tui-pdf --forward line:col:texfile path-to-pdf
 | `l` | Enter link mode |
 | `Enter` (in link mode) | Follow selected link |
 | `b` | Go back (after following a link) |
+| `w` | Fit to width |
 | `i` | Toggle color inversion |
+| `o` | Open Zotero browser |
+| `Tab` | Switch between open documents |
 | `q` / `Esc` | Quit |
 | Mouse wheel | Scroll up/down |
 | Ctrl+Click | SyncTeX reverse search (jump to source in neovim) |
@@ -122,6 +134,19 @@ tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
 **Auto-reload:** When the PDF file changes on disk (e.g. after recompiling LaTeX), tui-pdf automatically reloads it while preserving your scroll position.
 
 **Requirements:** `synctex` CLI tool (usually bundled with TeX distributions), PDF compiled with `pdflatex -synctex=1`, and `$NVIM` environment variable set for reverse search to jump to neovim.
+
+### Zotero integration
+
+tui-pdf can browse your local Zotero library and open saved PDFs directly.
+
+**One-time setup:** Point tui-pdf to your Zotero data directory:
+```bash
+tui-pdf --setup-zotero ~/Zotero
+```
+
+**Browse library:** Launch with `tui-pdf --zotero` or press `o` from within the viewer. The browser shows your collection hierarchy — navigate into collections with `Enter`, go back with `Backspace`, and type to filter by title/author/year. Select a paper and press `Enter` to open it.
+
+**Virtual tabs:** Documents you open are remembered with their scroll position and zoom level. Press `Tab` to cycle between them. Documents are reopened on switch rather than kept in memory, so there is no overhead.
 
 ## Library usage
 
