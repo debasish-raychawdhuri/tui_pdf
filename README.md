@@ -17,7 +17,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Background pre-rendering** — pages are rendered and cached in the background during idle time, so scrolling through large documents is instant
 - **Efficient caching** — stripe PNG cache with 100 MB LRU eviction
 - **Auto-reload** — detects file changes and reloads automatically, preserving scroll position (great for LaTeX workflows)
-- **SyncTeX reverse search** — Ctrl+Click on the PDF to jump to the corresponding source line in neovim (requires `synctex` CLI and `$NVIM` socket)
+- **SyncTeX reverse search** — Ctrl+Click on the PDF or press `s` for a keyboard-driven numbered probe overlay, then type a number to jump to the corresponding source line in neovim (requires `synctex` CLI and `$NVIM` socket)
 - **SyncTeX forward search** — integrates with texlab LSP to scroll the PDF to the source position (`tui-pdf --forward line:col:file doc.pdf`)
 - **Mouse wheel scrolling** — scroll through the document with the mouse wheel
 - **Fit to width** — resize zoom to fit the page width to the terminal (`w`)
@@ -110,6 +110,7 @@ tui-pdf --forward line:col:texfile path-to-pdf
 | `w` | Fit to width |
 | `i` | Toggle color inversion |
 | `o` | Open Zotero browser |
+| `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
 | `Tab` | Switch between open documents |
 | `x` | Close current document |
 | `q` / `Esc` | Quit |
@@ -128,7 +129,7 @@ Press `l` to activate link mode on the current page. Internal links are highligh
 
 tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
 
-**Reverse search (PDF → source):** Ctrl+Click anywhere on the PDF. If `synctex` is installed and your PDF was compiled with `-synctex=1`, it jumps to the corresponding source line in a running neovim instance (via the `$NVIM` socket).
+**Reverse search (PDF → source):** Ctrl+Click anywhere on the PDF, or press `s` for keyboard-driven reverse search. The `s` key probes synctex at a grid of points across the visible area, finds actual source locations, and overlays numbered badges directly into the page image. Type a number and press `Enter` to jump to that source line in neovim; press `Esc` to cancel. If `synctex` is installed and your PDF was compiled with `-synctex=1`, it jumps to the corresponding source line in a running neovim instance (via the `$NVIM` socket).
 
 **Forward search (source → PDF):** Configure your LSP (e.g. texlab) to use `tui-pdf --forward "%l:1:%f" "%p"` as the forward search command. When triggered from your editor, the running tui-pdf instance scrolls to the corresponding PDF position.
 
