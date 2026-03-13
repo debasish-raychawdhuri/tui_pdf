@@ -662,6 +662,12 @@ fn run_app(
                                 return Ok(AppAction::SwitchDoc(next));
                             }
                         }
+                        KeyCode::BackTab => {
+                            if open_docs.len() > 1 {
+                                let prev = if current_idx == 0 { open_docs.len() - 1 } else { current_idx - 1 };
+                                return Ok(AppAction::SwitchDoc(prev));
+                            }
+                        }
                         KeyCode::Char('d') => {
                             doc_picker = Some(current_idx);
                         }
