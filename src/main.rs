@@ -1,6 +1,8 @@
+use std::collections::HashSet;
 use std::fs;
 use std::io::{self, stdout, BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
@@ -29,6 +31,57 @@ enum AppAction {
     SwitchDoc(usize),
     CloseDoc,
     OpenLatest,
+}
+
+struct ProbeCell {
+    number: usize,
+    page: usize,
+    pdf_x: f32,
+    pdf_y: f32,
+    file: String,
+    line: usize,
+}
+
+fn compute_probe_grid(
+    pdf_state: &PdfViewState,
+    pdf_path: &Path,
+    area: ratatui::layout::Rect,
+) -> Vec<ProbeCell> {
+    let cell_h: u16 = 5;
+    let cols: u16 = 4;
+    let cell_w = area.width / cols;
+    if cell_w == 0 || cell_h == 0 {
+        return Vec::new();
+    }
+
+    let mut seen = HashSet::new();
+    let mut cells = Vec::new();
+    let mut number = 1;
+    let rows = area.height / cell_h;
+
+    for r in 0..rows {
+        for c in 0..cols {
+            let center_row = area.y + r * cell_h + cell_h / 2;
+            let center_col = area.x + c * cell_w + cell_w / 2;
+            if let Some((page, pdf_x, pdf_y)) = pdf_state.terminal_to_pdf(center_row, center_col) {
+                if let Some(result) = synctex_edit(pdf_path, page + 1, pdf_x, pdf_y) {
+                    let key = (result.file.clone(), result.line);
+                    if seen.insert(key) {
+                        cells.push(ProbeCell {
+                            number,
+                            page,
+                            pdf_x,
+                            pdf_y,
+                            file: result.file,
+                            line: result.line,
+                        });
+                        number += 1;
+                    }
+                }
+            }
+        }
+    }
+    cells
 }
 
 struct OpenDoc {
@@ -286,6 +339,10 @@ fn run_app(
     // Document picker state
     let mut doc_picker: Option<usize> = None; // selected index
 
+    // SyncTeX probe state
+    let mut synctex_probe: Option<String> = None;
+    let mut last_probe_grid: Vec<ProbeCell> = Vec::new();
+
     loop {
         // Progress incremental search
         if search_state.searching {
@@ -410,24 +467,41 @@ fn run_app(
 
                     TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
 
-                    if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
-                        let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
-                        frame.render_widget(msg, cols[1]);
+                    if synctex_probe.is_none() {
+                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                            let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                            frame.render_widget(msg, cols[1]);
+                        } else {
+                            frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
+                        }
                     } else {
                         frame.render_stateful_widget(PdfWidget, cols[1], pdf_state);
                     }
                 } else {
-                    if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
-                        let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
-                        frame.render_widget(msg, main_area);
+                    if synctex_probe.is_none() {
+                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                            let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
+                            frame.render_widget(msg, main_area);
+                        } else {
+                            frame.render_stateful_widget(PdfWidget, main_area, pdf_state);
+                        }
                     } else {
                         frame.render_stateful_widget(PdfWidget, main_area, pdf_state);
                     }
                 }
             }
 
-            // Status bar: status_message > search_input > goto_input > normal
-            if let Some((ref msg, _)) = status_message {
+            // Status bar: synctex_probe > status_message > search_input > goto_input > normal
+            if let Some(ref input) = synctex_probe {
+                let prompt = format!(" SyncTeX probe: {}█  (Enter: jump, Esc: cancel) ", input);
+                let line = Line::from(vec![Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Black).bg(Color::Yellow),
+                )]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(Color::Yellow))
+                    .render(status_area, frame.buffer_mut());
+            } else if let Some((ref msg, _)) = status_message {
                 let line = Line::from(vec![Span::styled(
                     format!(" {} ", msg),
                     Style::default().fg(Color::White).bg(Color::Magenta),
@@ -553,6 +627,50 @@ fn run_app(
                     continue;
                 }
 
+                // SyncTeX probe mode
+                if synctex_probe.is_some() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            synctex_probe = None;
+                            last_probe_grid.clear();
+                            pdf_state.clear_probe_markers();
+                        }
+                        KeyCode::Char(c) if c.is_ascii_digit() => {
+                            if let Some(input) = synctex_probe.as_mut() {
+                                input.push(c);
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = synctex_probe.as_mut() {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(input) = synctex_probe.take() {
+                                pdf_state.clear_probe_markers();
+                                if let Ok(num) = input.parse::<usize>() {
+                                    if let Some(cell) = last_probe_grid.iter().find(|c| c.number == num) {
+                                        if !jump_to_neovim(&cell.file, cell.line) {
+                                            status_message = Some((
+                                                format!("SyncTeX: {}:{}", cell.file, cell.line),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                    } else {
+                                        status_message = Some((
+                                            format!("SyncTeX: invalid cell {}", num),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                                last_probe_grid.clear();
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Search input mode
                 if search_input.is_some() {
                     match key.code {
@@ -670,6 +788,25 @@ fn run_app(
                         }
                         KeyCode::Char('d') => {
                             doc_picker = Some(current_idx);
+                        }
+                        KeyCode::Char('s') => {
+                            if let Some((ax, ay, aw, ah)) = pdf_state.last_render_area {
+                                let area = ratatui::layout::Rect::new(ax, ay, aw, ah);
+                                let grid = compute_probe_grid(pdf_state, document.path(), area);
+                                if grid.is_empty() {
+                                    status_message = Some((
+                                        "SyncTeX: no results on visible area".to_string(),
+                                        Instant::now(),
+                                    ));
+                                } else {
+                                    let markers: Vec<_> = grid.iter()
+                                        .map(|c| (c.page, c.pdf_x, c.pdf_y, c.number))
+                                        .collect();
+                                    pdf_state.apply_probe_markers(&markers);
+                                    last_probe_grid = grid;
+                                    synctex_probe = Some(String::new());
+                                }
+                            }
                         }
                         KeyCode::Esc => {
                             if search_state.active {

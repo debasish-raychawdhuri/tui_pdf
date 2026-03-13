@@ -18,6 +18,87 @@ use crate::renderer::{
 };
 use crate::search::SearchState;
 
+/// 5x7 bitmap font for digits 0-9.
+const DIGIT_W: u32 = 5;
+const DIGIT_H: u32 = 7;
+const DIGIT_SCALE: u32 = 3;
+const BADGE_PAD: u32 = 5;
+
+#[rustfmt::skip]
+const DIGITS: [[u8; 35]; 10] = [
+    [0,1,1,1,0, 1,0,0,0,1, 1,0,0,1,1, 1,0,1,0,1, 1,1,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+    [0,0,1,0,0, 0,1,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,1,1,1,0],
+    [0,1,1,1,0, 1,0,0,0,1, 0,0,0,0,1, 0,0,0,1,0, 0,0,1,0,0, 0,1,0,0,0, 1,1,1,1,1],
+    [0,1,1,1,0, 1,0,0,0,1, 0,0,0,0,1, 0,0,1,1,0, 0,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+    [0,0,0,1,0, 0,0,1,1,0, 0,1,0,1,0, 1,0,0,1,0, 1,1,1,1,1, 0,0,0,1,0, 0,0,0,1,0],
+    [1,1,1,1,1, 1,0,0,0,0, 1,1,1,1,0, 0,0,0,0,1, 0,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+    [0,1,1,1,0, 1,0,0,0,0, 1,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+    [1,1,1,1,1, 0,0,0,0,1, 0,0,0,1,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0, 0,0,1,0,0],
+    [0,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,0],
+    [0,1,1,1,0, 1,0,0,0,1, 1,0,0,0,1, 0,1,1,1,1, 0,0,0,0,1, 0,0,0,0,1, 0,1,1,1,0],
+];
+
+fn draw_number_badge(img: &mut image::RgbaImage, cx: i32, cy: i32, number: usize) {
+    let text = number.to_string();
+    let num_digits = text.len() as u32;
+    let scaled_w = DIGIT_W * DIGIT_SCALE;
+    let scaled_h = DIGIT_H * DIGIT_SCALE;
+    let gap = DIGIT_SCALE;
+    let badge_w = num_digits * scaled_w + num_digits.saturating_sub(1) * gap + BADGE_PAD * 2;
+    let badge_h = scaled_h + BADGE_PAD * 2;
+    let bx = cx - badge_w as i32 / 2;
+    let by = cy - badge_h as i32 / 2;
+    let (iw, ih) = (img.width() as i32, img.height() as i32);
+
+    // Background + border
+    for dy in 0..badge_h as i32 {
+        for dx in 0..badge_w as i32 {
+            let px = bx + dx;
+            let py = by + dy;
+            if px >= 0 && px < iw && py >= 0 && py < ih {
+                let is_border = dx == 0 || dy == 0
+                    || dx == badge_w as i32 - 1
+                    || dy == badge_h as i32 - 1;
+                let color = if is_border {
+                    image::Rgba([40, 40, 40, 255])
+                } else {
+                    image::Rgba([255, 220, 50, 240])
+                };
+                img.put_pixel(px as u32, py as u32, color);
+            }
+        }
+    }
+
+    // Digits
+    let mut digit_x = bx + BADGE_PAD as i32;
+    for ch in text.chars() {
+        let d = (ch as u8 - b'0') as usize;
+        if d < 10 {
+            let bitmap = &DIGITS[d];
+            for row in 0..DIGIT_H {
+                for col in 0..DIGIT_W {
+                    if bitmap[(row * DIGIT_W + col) as usize] != 0 {
+                        for sy in 0..DIGIT_SCALE {
+                            for sx in 0..DIGIT_SCALE {
+                                let px = digit_x + (col * DIGIT_SCALE + sx) as i32;
+                                let py = by + BADGE_PAD as i32 + (row * DIGIT_SCALE + sy) as i32;
+                                if px >= 0 && px < iw && py >= 0 && py < ih {
+                                    img.put_pixel(
+                                        px as u32,
+                                        py as u32,
+                                        image::Rgba([20, 20, 20, 255]),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        digit_x += (scaled_w + gap) as i32;
+    }
+}
+
 pub struct PdfViewState {
     pub global_scroll: usize,
     pub zoom: f32,
@@ -50,6 +131,9 @@ pub struct PdfViewState {
 
     /// Last render area for terminal-to-PDF coordinate conversion.
     pub last_render_area: Option<(u16, u16, u16, u16)>,
+
+    /// Stripes modified by probe markers: (page, stripe_index)
+    probe_dirty_stripes: Vec<(usize, usize)>,
 }
 
 impl PdfViewState {
@@ -73,6 +157,7 @@ impl PdfViewState {
             prerender_pos: 0,
             inverted: false,
             last_render_area: None,
+            probe_dirty_stripes: Vec::new(),
         }
     }
 
@@ -678,6 +763,96 @@ impl PdfViewState {
 
         Ok(())
     }
+
+    /// Draw numbered markers into the rendered stripe protocols.
+    /// Each marker is (page_0indexed, pdf_x, pdf_y, number).
+    /// Call once when entering probe mode. Call `clear_probe_markers` to undo.
+    pub fn apply_probe_markers(&mut self, markers: &[(usize, f32, f32, usize)]) {
+        let cache_key = self.cache_key();
+        let font_height = self.picker.font_size().1 as u32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+
+        self.probe_dirty_stripes.clear();
+
+        // Group markers by page
+        let mut by_page: HashMap<usize, Vec<(f32, f32, usize)>> = HashMap::new();
+        for &(page, pdf_x, pdf_y, number) in markers {
+            by_page.entry(page).or_default().push((pdf_x, pdf_y, number));
+        }
+
+        for (page_idx, page_markers) in &by_page {
+            let stripe_count = self.page_stripe_counts.get(*page_idx).copied().unwrap_or(0);
+
+            // Ensure base protocols exist
+            self.build_page_protocols(*page_idx);
+
+            // Group markers by stripe — each marker may span multiple stripes
+            let scaled_h = DIGIT_H * DIGIT_SCALE;
+            let badge_h = scaled_h + BADGE_PAD * 2;
+            let half_h = badge_h as i32 / 2 + 1;
+            let mut stripe_markers: HashMap<usize, Vec<(i32, i32, usize)>> = HashMap::new();
+            for &(pdf_x, pdf_y, number) in page_markers {
+                let pixel_x = (pdf_x * scale).round() as i32;
+                let pixel_y = (pdf_y * scale).round() as i32;
+                let top_y = pixel_y - half_h;
+                let bot_y = pixel_y + half_h;
+                let s0 = (top_y.max(0) as u32 / font_height.max(1)) as usize;
+                let s1 = (bot_y.max(0) as u32 / font_height.max(1)) as usize;
+                for s in s0..=s1.min(stripe_count.saturating_sub(1)) {
+                    let local_y = pixel_y - (s as i32 * font_height as i32);
+                    stripe_markers
+                        .entry(s)
+                        .or_default()
+                        .push((pixel_x, local_y, number));
+                }
+            }
+
+            // Now borrow cache for the stripe PNGs
+            let stripe_pngs = match self.cache.get(*page_idx, cache_key) {
+                Some(p) => p,
+                None => continue,
+            };
+
+            for (stripe_idx, smarkers) in &stripe_markers {
+                if *stripe_idx >= stripe_pngs.len() {
+                    continue;
+                }
+                let base = decode_png(&stripe_pngs[*stripe_idx]);
+                let mut rgba = base.to_rgba8();
+                for &(x, y, num) in smarkers {
+                    draw_number_badge(&mut rgba, x, y, num);
+                }
+                let modified = image::DynamicImage::ImageRgba8(rgba);
+                if let Some(proto) = self.build_protocol(modified) {
+                    if let Some(page_protos) = self.rendered_pages.get_mut(page_idx) {
+                        if *stripe_idx < page_protos.len() {
+                            page_protos[*stripe_idx] = proto;
+                            self.probe_dirty_stripes.push((*page_idx, *stripe_idx));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore stripes that were modified by probe markers back to clean cache versions.
+    pub fn clear_probe_markers(&mut self) {
+        let cache_key = self.cache_key();
+        let dirty = std::mem::take(&mut self.probe_dirty_stripes);
+        for (page_idx, stripe_idx) in dirty {
+            if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
+                if let Some(png) = stripe_pngs.get(stripe_idx) {
+                    if let Some(proto) = self.build_protocol(decode_png(png)) {
+                        if let Some(page_protos) = self.rendered_pages.get_mut(&page_idx) {
+                            if stripe_idx < page_protos.len() {
+                                page_protos[stripe_idx] = proto;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 
 pub struct PdfWidget;
@@ -796,7 +971,7 @@ impl<'a> Widget for StatusBar<'a> {
         } else {
             let back_hint = if has_back { " | b: back" } else { "" };
             format!(
-                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | w: fit | i: invert | l: links | t: toc | o: zotero | Tab/d: switch | x: close{} | q: quit ",
+                " Page {}/{} | Zoom: {:.0}%{} | j/k: scroll | n/p: page | g: goto | /: search | +/-: zoom | w: fit | i: invert | l: links | t: toc | s: synctex | o: zotero | Tab/d: switch | x: close{} | q: quit ",
                 self.state.current_page() + 1,
                 self.state.page_count(),
                 self.state.zoom * 100.0,
