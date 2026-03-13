@@ -98,7 +98,7 @@ fn main() -> io::Result<()> {
 
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
-        eprintln!("Usage: tui-pdf [--forward line:col:file] [--setup-zotero <dir>] [--zotero] <path-to-pdf>");
+        eprintln!("Usage: tui-pdf [--forward line:col:file] [--setup-zotero <dir>] [--zotero] <pdf>...");
         std::process::exit(1);
     }
 
@@ -149,7 +149,10 @@ fn main() -> io::Result<()> {
             std::process::exit(1);
         }
         match run_zotero_browser(&library) {
-            Ok(Some(pdf_path)) => return open_viewer(&pdf_path.to_string_lossy()),
+            Ok(Some(pdf_path)) => {
+                let s = pdf_path.to_string_lossy().to_string();
+                return open_viewer(&[&s]);
+            }
             Ok(None) => std::process::exit(0),
             Err(e) => {
                 eprintln!("Browser error: {e}");
@@ -158,14 +161,19 @@ fn main() -> io::Result<()> {
         }
     }
 
-    let pdf_path = &args[1];
-    open_viewer(pdf_path)
+    // Collect all remaining args as PDF paths
+    let pdf_paths: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
+    open_viewer(&pdf_paths)
 }
 
-fn open_viewer(pdf_path: &str) -> io::Result<()> {
-    let mut open_docs: Vec<OpenDoc> = Vec::new();
+fn open_viewer(pdf_paths: &[&str]) -> io::Result<()> {
+    let mut open_docs: Vec<OpenDoc> = pdf_paths.iter().map(|p| OpenDoc {
+        path: p.to_string(),
+        scroll: 0,
+        zoom: 1.0,
+    }).collect();
     let mut current_idx: usize = 0;
-    let mut current_path = pdf_path.to_string();
+    let mut current_path = open_docs[0].path.clone();
     let mut inverted = false;
     let zotero_dir: Option<String> = load_config().zotero_dir;
 
