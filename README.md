@@ -88,6 +88,9 @@ tui-pdf --forward line:col:texfile path-to-pdf
 
 # Restore a saved session:
 tui-pdf --session mysession
+
+# List saved sessions:
+tui-pdf --list-sessions
 ```
 
 ### Keybindings
@@ -113,9 +116,12 @@ tui-pdf --session mysession
 | `b` | Go back (after following a link) |
 | `w` | Fit to width |
 | `i` | Toggle color inversion |
+| `m` | Show Zotero metadata for current document |
 | `o` | Open Zotero browser |
+| `O` | Open latest Zotero PDF |
 | `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
-| `Tab` | Switch between open documents |
+| `d` | Document picker |
+| `Tab` / `Shift+Tab` | Cycle between open documents |
 | `S` | Save session (prompts for name, or saves to current session) |
 | `x` | Close current document |
 | `q` / `Esc` | Quit |
@@ -151,9 +157,15 @@ tui-pdf can browse your local Zotero library and open saved PDFs directly.
 tui-pdf --setup-zotero ~/Zotero
 ```
 
-**Browse library:** Launch with `tui-pdf --zotero` or press `o` from within the viewer. The browser shows your collection hierarchy — navigate into collections with `Enter`, go back with `Backspace`, and type to filter by title/author/year. Select a paper and press `Enter` to open it.
+**Browse library:** Launch with `tui-pdf --zotero` or press `o` from within the viewer. The browser shows your collection hierarchy — navigate into collections with `Enter`, go back with `Backspace`, and type to filter by title/author/year. Select a paper and press `Enter` to open it. Press `m` on a paper to view its metadata.
+
+**Metadata:** Press `m` in the viewer or the Zotero browser to see the title, authors, year, and file path for the current document (looked up from the Zotero database).
 
 **Virtual tabs:** Documents you open are remembered with their scroll position and zoom level. Press `Tab` to cycle between them. Documents are reopened on switch rather than kept in memory, so there is no overhead.
+
+### Sessions
+
+Save your workspace with `S` — all open documents, scroll positions, and zoom levels are persisted to a named session file. Restore with `tui-pdf --session <name>`. List saved sessions with `tui-pdf --list-sessions`.
 
 ## Library usage
 
