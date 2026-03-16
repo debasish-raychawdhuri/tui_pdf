@@ -23,7 +23,7 @@ use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
     ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
-    load_session, save_session, list_sessions, Session, SessionDoc,
+    load_session, save_session, list_sessions, lookup_by_path, Session, SessionDoc,
 };
 
 enum AppAction {
@@ -345,6 +345,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             &open_docs,
             current_idx,
             &session_name,
+            &zotero_dir,
         );
 
         let _ = fs::remove_file(&sock);
@@ -430,6 +431,7 @@ fn run_app(
     open_docs: &[OpenDoc],
     current_idx: usize,
     session_name: &Option<String>,
+    zotero_dir: &Option<String>,
 ) -> io::Result<AppAction> {
     // Auto-reload state
     let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
@@ -450,6 +452,9 @@ fn run_app(
     // Session name input
     let mut session_input: Option<String> = None;
     let mut saved_session_name: Option<String> = None;
+
+    // Metadata view
+    let mut metadata_view: Option<Vec<(String, String)>> = None;
 
     loop {
         // Progress incremental search
@@ -521,7 +526,31 @@ fn run_app(
             let main_area = outer[0];
             let status_area = outer[1];
 
-            if doc_picker.is_some() {
+            if let Some(ref fields) = metadata_view {
+                // Metadata overlay
+                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+                let title_area = ratatui::layout::Rect {
+                    x: main_area.x, y: main_area.y, width: main_area.width, height: 1,
+                };
+                Paragraph::new(Span::styled(" Zotero Metadata (Esc: close) ", title_style))
+                    .style(title_style)
+                    .render(title_area, frame.buffer_mut());
+
+                let label_style = Style::default().fg(Color::Yellow);
+                let value_style = Style::default().fg(Color::White);
+                for (i, (label, value)) in fields.iter().enumerate() {
+                    let row = main_area.y + 2 + i as u16;
+                    if row >= main_area.y + main_area.height { break; }
+                    let area = ratatui::layout::Rect {
+                        x: main_area.x, y: row, width: main_area.width, height: 1,
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(format!("  {}: ", label), label_style),
+                        Span::styled(value.clone(), value_style),
+                    ]);
+                    Paragraph::new(line).render(area, frame.buffer_mut());
+                }
+            } else if doc_picker.is_some() {
                 // Document picker: render list in main area
                 let sel = doc_picker.unwrap();
                 let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
@@ -719,6 +748,14 @@ fn run_app(
 
             if let Event::Key(key) = ev {
                 if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+
+                // Metadata view mode
+                if metadata_view.is_some() {
+                    if key.code == KeyCode::Esc || key.code == KeyCode::Char('m') || key.code == KeyCode::Char('q') {
+                        metadata_view = None;
+                    }
                     continue;
                 }
 
@@ -984,6 +1021,34 @@ fn run_app(
                         KeyCode::Char('d') => {
                             doc_picker = Some(current_idx);
                         }
+                        KeyCode::Char('m') => {
+                            if let Some(dir) = zotero_dir {
+                                if let Some(entry) = lookup_by_path(
+                                    std::path::Path::new(dir),
+                                    document.path(),
+                                ) {
+                                    let mut fields = vec![
+                                        ("Title".to_string(), entry.title),
+                                        ("Authors".to_string(), entry.authors),
+                                    ];
+                                    if !entry.year.is_empty() {
+                                        fields.push(("Year".to_string(), entry.year));
+                                    }
+                                    fields.push(("File".to_string(), entry.pdf_path.display().to_string()));
+                                    metadata_view = Some(fields);
+                                } else {
+                                    status_message = Some((
+                                        "No Zotero metadata found for this file".to_string(),
+                                        Instant::now(),
+                                    ));
+                                }
+                            } else {
+                                status_message = Some((
+                                    "Zotero not configured. Run: tui-pdf --setup-zotero <dir>".to_string(),
+                                    Instant::now(),
+                                ));
+                            }
+                        }
                         KeyCode::Char('s') => {
                             if let Some((ax, ay, aw, ah)) = pdf_state.last_render_area {
                                 let area = ratatui::layout::Rect::new(ax, ay, aw, ah);
@@ -1119,6 +1184,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
     let mut selected: usize = 0;
     // Stack of collection IDs we've navigated into (None = root)
     let mut path_stack: Vec<Option<i64>> = vec![None];
+    let mut metadata_view: Option<Vec<(String, String)>> = None;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -1203,51 +1269,77 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                 .render(chunks[0], frame.buffer_mut());
             }
 
-            // List
-            let list_height = chunks[1].height as usize;
-            let scroll_offset = if selected >= list_height {
-                selected - list_height + 1
+            if let Some(ref fields) = metadata_view {
+                // Metadata overlay
+                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+                let title_area = ratatui::layout::Rect {
+                    x: chunks[1].x, y: chunks[1].y, width: chunks[1].width, height: 1,
+                };
+                Paragraph::new(Span::styled(" Zotero Metadata (Esc/m: close) ", title_style))
+                    .style(title_style)
+                    .render(title_area, frame.buffer_mut());
+
+                let label_style = Style::default().fg(Color::Yellow);
+                let value_style = Style::default().fg(Color::White);
+                for (i, (label, value)) in fields.iter().enumerate() {
+                    let row = chunks[1].y + 2 + i as u16;
+                    if row >= chunks[1].y + chunks[1].height { break; }
+                    let area = ratatui::layout::Rect {
+                        x: chunks[1].x, y: row, width: chunks[1].width, height: 1,
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(format!("  {}: ", label), label_style),
+                        Span::styled(value.clone(), value_style),
+                    ]);
+                    Paragraph::new(line).render(area, frame.buffer_mut());
+                }
             } else {
-                0
-            };
-
-            for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
-                let is_selected = scroll_offset + row == selected;
-                let width = chunks[1].width as usize;
-
-                let text = match item {
-                    BrowserItem::Collection { name, .. } => {
-                        format!("[{}]", name)
-                    }
-                    BrowserItem::Paper { entry_idx } => {
-                        let e = &library.entries[*entry_idx];
-                        let year_part = if e.year.is_empty() { String::new() } else { format!(" ({})", e.year) };
-                        let author_part = if e.authors.is_empty() { String::new() } else { format!(" — {}", e.authors) };
-                        format!("  {}{}{}", e.title, author_part, year_part)
-                    }
-                };
-
-                let truncated = if text.len() > width {
-                    format!("{}…", &text[..width.saturating_sub(1)])
+                // List
+                let list_height = chunks[1].height as usize;
+                let scroll_offset = if selected >= list_height {
+                    selected - list_height + 1
                 } else {
-                    text
+                    0
                 };
 
-                let style = match (is_selected, item) {
-                    (true, _) => Style::default().fg(Color::Black).bg(Color::White),
-                    (false, BrowserItem::Collection { .. }) => Style::default().fg(Color::Yellow),
-                    (false, BrowserItem::Paper { .. }) => Style::default().fg(Color::White),
-                };
+                for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
+                    let is_selected = scroll_offset + row == selected;
+                    let width = chunks[1].width as usize;
 
-                let area = ratatui::layout::Rect {
-                    x: chunks[1].x,
-                    y: chunks[1].y + row as u16,
-                    width: chunks[1].width,
-                    height: 1,
-                };
-                Paragraph::new(Span::styled(truncated, style))
-                    .style(style)
-                    .render(area, frame.buffer_mut());
+                    let text = match item {
+                        BrowserItem::Collection { name, .. } => {
+                            format!("[{}]", name)
+                        }
+                        BrowserItem::Paper { entry_idx } => {
+                            let e = &library.entries[*entry_idx];
+                            let year_part = if e.year.is_empty() { String::new() } else { format!(" ({})", e.year) };
+                            let author_part = if e.authors.is_empty() { String::new() } else { format!(" — {}", e.authors) };
+                            format!("  {}{}{}", e.title, author_part, year_part)
+                        }
+                    };
+
+                    let truncated = if text.len() > width {
+                        format!("{}…", &text[..width.saturating_sub(1)])
+                    } else {
+                        text
+                    };
+
+                    let style = match (is_selected, item) {
+                        (true, _) => Style::default().fg(Color::Black).bg(Color::White),
+                        (false, BrowserItem::Collection { .. }) => Style::default().fg(Color::Yellow),
+                        (false, BrowserItem::Paper { .. }) => Style::default().fg(Color::White),
+                    };
+
+                    let area = ratatui::layout::Rect {
+                        x: chunks[1].x,
+                        y: chunks[1].y + row as u16,
+                        width: chunks[1].width,
+                        height: 1,
+                    };
+                    Paragraph::new(Span::styled(truncated, style))
+                        .style(style)
+                        .render(area, frame.buffer_mut());
+                }
             }
 
             // Status bar
@@ -1270,6 +1362,12 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Metadata view: any key closes it
+                if metadata_view.is_some() {
+                    metadata_view = None;
+                    continue;
+                }
+
                 match key.code {
                     KeyCode::Esc => {
                         if !filter.is_empty() {
@@ -1308,6 +1406,22 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                     KeyCode::Down => {
                         if !items.is_empty() {
                             selected = (selected + 1).min(items.len() - 1);
+                        }
+                    }
+                    KeyCode::Char('m') if filter.is_empty() => {
+                        if let Some(item) = items.get(selected) {
+                            if let BrowserItem::Paper { entry_idx } = item {
+                                let e = &library.entries[*entry_idx];
+                                let mut fields = vec![
+                                    ("Title".to_string(), e.title.clone()),
+                                    ("Authors".to_string(), e.authors.clone()),
+                                ];
+                                if !e.year.is_empty() {
+                                    fields.push(("Year".to_string(), e.year.clone()));
+                                }
+                                fields.push(("File".to_string(), e.pdf_path.display().to_string()));
+                                metadata_view = Some(fields);
+                            }
                         }
                     }
                     KeyCode::Char('/') if filter.is_empty() => {

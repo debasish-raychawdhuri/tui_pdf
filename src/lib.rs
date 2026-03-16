@@ -18,4 +18,4 @@ pub use search::SearchState;
 pub use synctex::{jump_to_neovim, send_forward, socket_path, synctex_edit, synctex_view, SyncTexResult, SyncTexForward};
 pub use toc::{TocState, TocWidget};
 pub use widget::{PdfViewState, PdfWidget, StatusBar};
-pub use zotero::{latest_pdf, load_library, ZoteroEntry, ZoteroLibrary};
+pub use zotero::{latest_pdf, load_library, lookup_by_path, ZoteroEntry, ZoteroLibrary};

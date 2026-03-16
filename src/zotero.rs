@@ -226,6 +226,96 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
     })
 }
 
+/// Look up Zotero metadata for a PDF by its file path.
+pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry> {
+    let canonical = pdf_path.canonicalize().ok()?;
+    let db_path = zotero_dir.join("zotero.sqlite");
+    let db_uri = format!("file:{}?immutable=1", db_path.display());
+    let conn = Connection::open_with_flags(
+        &db_uri,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    ).ok()?;
+
+    let storage_dir = zotero_dir.join("storage");
+
+    let mut att_stmt = conn.prepare(
+        "SELECT ia.parentItemID, ia.path, items.key
+         FROM itemAttachments ia
+         JOIN items ON items.itemID = ia.itemID
+         WHERE ia.linkMode = 1
+           AND ia.contentType = 'application/pdf'
+           AND ia.parentItemID IS NOT NULL"
+    ).ok()?;
+
+    let rows = att_stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    }).ok()?;
+
+    let mut parent_id = None;
+    for row in rows {
+        let (pid, path, key) = row.ok()?;
+        let resolved = if let Some(filename) = path.strip_prefix("storage:") {
+            storage_dir.join(&key).join(filename)
+        } else {
+            PathBuf::from(&path)
+        };
+        if let Ok(c) = resolved.canonicalize() {
+            if c == canonical {
+                parent_id = Some(pid);
+                break;
+            }
+        }
+    }
+
+    let parent_id = parent_id?;
+
+    let title: String = conn.query_row(
+        "SELECT idv.value FROM itemData id
+         JOIN itemDataValues idv ON idv.valueID = id.valueID
+         JOIN fields f ON f.fieldID = id.fieldID
+         WHERE id.itemID = ? AND f.fieldName = 'title'",
+        [parent_id], |row| row.get(0),
+    ).unwrap_or_default();
+
+    let mut author_stmt = conn.prepare(
+        "SELECT c.firstName, c.lastName
+         FROM itemCreators ic
+         JOIN creators c ON c.creatorID = ic.creatorID
+         WHERE ic.itemID = ?
+         ORDER BY ic.orderIndex"
+    ).ok()?;
+    let authors: Vec<String> = author_stmt
+        .query_map([parent_id], |row| {
+            let first: String = row.get(0)?;
+            let last: String = row.get(1)?;
+            if first.is_empty() { Ok(last) } else { Ok(format!("{first} {last}")) }
+        }).ok()?
+        .filter_map(|r| r.ok())
+        .collect();
+    let authors = authors.join(", ");
+
+    let year: String = conn.query_row(
+        "SELECT idv.value FROM itemData id
+         JOIN itemDataValues idv ON idv.valueID = id.valueID
+         JOIN fields f ON f.fieldID = id.fieldID
+         WHERE id.itemID = ? AND f.fieldName = 'date'",
+        [parent_id], |row| row.get::<_, String>(0),
+    ).unwrap_or_default();
+    let year = year.chars().take(4).collect::<String>();
+
+    Some(ZoteroEntry {
+        item_id: parent_id,
+        title,
+        authors,
+        year,
+        pdf_path: pdf_path.to_path_buf(),
+    })
+}
+
 /// Return the PDF path of the most recently added Zotero item.
 pub fn latest_pdf(zotero_dir: &Path) -> Option<PathBuf> {
     let db_path = zotero_dir.join("zotero.sqlite");
