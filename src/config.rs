@@ -7,14 +7,39 @@ pub struct Config {
     pub zotero_dir: Option<String>,
 }
 
-pub fn config_path() -> PathBuf {
-    let config_dir = std::env::var("XDG_CONFIG_HOME")
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct SessionDoc {
+    pub path: String,
+    pub scroll: usize,
+    pub zoom: f32,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+pub struct Session {
+    pub docs: Vec<SessionDoc>,
+    pub current: usize,
+}
+
+fn config_dir() -> PathBuf {
+    let base = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
             PathBuf::from(home).join(".config")
         });
-    config_dir.join("tui-pdf").join("config.toml")
+    base.join("tui-pdf")
+}
+
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+fn sessions_dir() -> PathBuf {
+    config_dir().join("sessions")
+}
+
+pub fn session_path(name: &str) -> PathBuf {
+    sessions_dir().join(format!("{}.toml", name))
 }
 
 pub fn load_config() -> Config {
@@ -32,4 +57,32 @@ pub fn save_config(config: &Config) -> io::Result<()> {
     }
     let contents = toml::to_string_pretty(config).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&path, contents)
+}
+
+pub fn load_session(name: &str) -> Option<Session> {
+    let path = session_path(name);
+    let contents = fs::read_to_string(&path).ok()?;
+    toml::from_str(&contents).ok()
+}
+
+pub fn save_session(name: &str, session: &Session) -> io::Result<()> {
+    let dir = sessions_dir();
+    fs::create_dir_all(&dir)?;
+    let path = dir.join(format!("{}.toml", name));
+    let contents = toml::to_string_pretty(session).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+    fs::write(&path, contents)
+}
+
+pub fn list_sessions() -> Vec<String> {
+    let dir = sessions_dir();
+    let mut names = Vec::new();
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            if let Some(name) = entry.path().file_stem() {
+                names.push(name.to_string_lossy().to_string());
+            }
+        }
+    }
+    names.sort();
+    names
 }

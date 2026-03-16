@@ -23,6 +23,7 @@ use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
     ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
+    load_session, save_session, list_sessions, Session, SessionDoc,
 };
 
 enum AppAction {
@@ -90,6 +91,48 @@ struct OpenDoc {
     zoom: f32,
 }
 
+fn print_help() {
+    println!("tui-pdf — a terminal PDF viewer with image rendering
+
+USAGE:
+    tui-pdf [OPTIONS] <pdf>...
+
+ARGUMENTS:
+    <pdf>...                    One or more PDF files to open
+
+OPTIONS:
+    -h, --help                  Show this help message
+    --session <name>            Restore a saved session by name
+    --list-sessions             List all saved sessions
+    --zotero                    Browse Zotero library and open a PDF
+    --setup-zotero <dir>        Configure Zotero data directory (one-time)
+    --forward <line:col:file> <pdf>
+                                Send forward search to a running instance
+
+KEYBINDINGS:
+    j/k, Up/Down                Scroll up/down
+    n/p, Right/Left, PgDn/PgUp  Next/previous page
+    Home/End                    First/last page
+    g                           Go to page number
+    +/- or =/−                  Zoom in/out
+    w                           Fit to width
+    /                           Search text (n/p: next/prev match)
+    t                           Toggle table of contents
+    l                           Enter link mode (j/k: select, Enter: follow)
+    b                           Go back after following a link
+    i                           Toggle color inversion
+    s                           SyncTeX probe (keyboard reverse search)
+    o                           Open Zotero browser
+    O                           Open latest Zotero PDF
+    S                           Save session (prompts for name first time)
+    d                           Document picker
+    Tab/Shift+Tab               Cycle between open documents
+    x                           Close current document
+    q/Esc                       Quit
+    Mouse wheel                 Scroll
+    Ctrl+Click                  SyncTeX reverse search");
+}
+
 fn main() -> io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {info}\n\nBacktrace:\n{}", std::backtrace::Backtrace::force_capture());
@@ -97,9 +140,35 @@ fn main() -> io::Result<()> {
     }));
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Usage: tui-pdf [--forward line:col:file] [--setup-zotero <dir>] [--zotero] <pdf>...");
-        std::process::exit(1);
+
+    if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
+        print_help();
+        std::process::exit(if args.len() < 2 { 1 } else { 0 });
+    }
+
+    // Handle --list-sessions
+    if args[1] == "--list-sessions" {
+        let sessions = list_sessions();
+        if sessions.is_empty() {
+            println!("No saved sessions.");
+        } else {
+            println!("Saved sessions:");
+            for name in &sessions {
+                if let Some(sess) = load_session(name) {
+                    println!("  {} ({} doc{})", name, sess.docs.len(), if sess.docs.len() == 1 { "" } else { "s" });
+                    for doc in &sess.docs {
+                        let short = std::path::Path::new(&doc.path)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| doc.path.clone());
+                        println!("    {}", short);
+                    }
+                } else {
+                    println!("  {}", name);
+                }
+            }
+        }
+        std::process::exit(0);
     }
 
     // Handle --forward: send command to running instance and exit
@@ -133,6 +202,22 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
+    // Handle --session: restore a named session
+    if args.len() >= 3 && args[1] == "--session" {
+        let name = &args[2];
+        match load_session(name) {
+            Some(session) if !session.docs.is_empty() => {
+                let paths: Vec<String> = session.docs.iter().map(|d| d.path.clone()).collect();
+                let refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+                return open_viewer(&refs, Some(name.clone()), Some(&session));
+            }
+            _ => {
+                eprintln!("Session '{}' not found or empty", name);
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Handle --zotero: browse Zotero library and open selected PDF
     if args.len() >= 2 && args[1] == "--zotero" {
         let config = load_config();
@@ -151,7 +236,7 @@ fn main() -> io::Result<()> {
         match run_zotero_browser(&library) {
             Ok(Some(pdf_path)) => {
                 let s = pdf_path.to_string_lossy().to_string();
-                return open_viewer(&[&s]);
+                return open_viewer(&[&s], None, None);
             }
             Ok(None) => std::process::exit(0),
             Err(e) => {
@@ -163,19 +248,28 @@ fn main() -> io::Result<()> {
 
     // Collect all remaining args as PDF paths
     let pdf_paths: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-    open_viewer(&pdf_paths)
+    open_viewer(&pdf_paths, None, None)
 }
 
-fn open_viewer(pdf_paths: &[&str]) -> io::Result<()> {
-    let mut open_docs: Vec<OpenDoc> = pdf_paths.iter().map(|p| OpenDoc {
-        path: p.to_string(),
-        scroll: 0,
-        zoom: 1.0,
-    }).collect();
-    let mut current_idx: usize = 0;
-    let mut current_path = open_docs[0].path.clone();
+fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option<&Session>) -> io::Result<()> {
+    let mut open_docs: Vec<OpenDoc> = if let Some(sess) = session {
+        sess.docs.iter().map(|d| OpenDoc {
+            path: d.path.clone(),
+            scroll: d.scroll,
+            zoom: d.zoom,
+        }).collect()
+    } else {
+        pdf_paths.iter().map(|p| OpenDoc {
+            path: p.to_string(),
+            scroll: 0,
+            zoom: 1.0,
+        }).collect()
+    };
+    let mut current_idx: usize = session.map_or(0, |s| s.current.min(open_docs.len().saturating_sub(1)));
+    let mut current_path = open_docs[current_idx].path.clone();
     let mut inverted = false;
     let zotero_dir: Option<String> = load_config().zotero_dir;
+    let session_name = session_name;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -250,6 +344,7 @@ fn open_viewer(pdf_paths: &[&str]) -> io::Result<()> {
             listener.as_ref(),
             &open_docs,
             current_idx,
+            &session_name,
         );
 
         let _ = fs::remove_file(&sock);
@@ -334,6 +429,7 @@ fn run_app(
     listener: Option<&UnixListener>,
     open_docs: &[OpenDoc],
     current_idx: usize,
+    session_name: &Option<String>,
 ) -> io::Result<AppAction> {
     // Auto-reload state
     let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
@@ -350,6 +446,10 @@ fn run_app(
     // SyncTeX probe state
     let mut synctex_probe: Option<String> = None;
     let mut last_probe_grid: Vec<ProbeCell> = Vec::new();
+
+    // Session name input
+    let mut session_input: Option<String> = None;
+    let mut saved_session_name: Option<String> = None;
 
     loop {
         // Progress incremental search
@@ -499,8 +599,17 @@ fn run_app(
                 }
             }
 
-            // Status bar: synctex_probe > status_message > search_input > goto_input > normal
-            if let Some(ref input) = synctex_probe {
+            // Status bar: session_input > synctex_probe > status_message > search_input > goto_input > normal
+            if let Some(ref input) = session_input {
+                let prompt = format!(" Session name: {}█  (Enter: save, Esc: cancel) ", input);
+                let line = Line::from(vec![Span::styled(
+                    prompt,
+                    Style::default().fg(Color::Black).bg(Color::Green),
+                )]);
+                Paragraph::new(line)
+                    .style(Style::default().bg(Color::Green))
+                    .render(status_area, frame.buffer_mut());
+            } else if let Some(ref input) = synctex_probe {
                 let prompt = format!(" SyncTeX probe: {}█  (Enter: jump, Esc: cancel) ", input);
                 let line = Line::from(vec![Span::styled(
                     prompt,
@@ -628,6 +737,55 @@ fn run_app(
                             doc_picker = None;
                             if idx != current_idx {
                                 return Ok(AppAction::SwitchDoc(idx));
+                            }
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                // Session name input mode
+                if session_input.is_some() {
+                    match key.code {
+                        KeyCode::Esc => { session_input = None; }
+                        KeyCode::Enter => {
+                            if let Some(name) = session_input.take() {
+                                let name = name.trim().to_string();
+                                if !name.is_empty() {
+                                    let sess = Session {
+                                        docs: open_docs.iter().map(|d| SessionDoc {
+                                            path: d.path.clone(),
+                                            scroll: d.scroll,
+                                            zoom: d.zoom,
+                                        }).collect(),
+                                        current: current_idx,
+                                    };
+                                    match save_session(&name, &sess) {
+                                        Ok(_) => {
+                                            status_message = Some((
+                                                format!("Session '{}' saved", name),
+                                                Instant::now(),
+                                            ));
+                                            saved_session_name = Some(name);
+                                        }
+                                        Err(e) => {
+                                            status_message = Some((
+                                                format!("Failed to save session: {}", e),
+                                                Instant::now(),
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            if let Some(input) = session_input.as_mut() {
+                                input.pop();
+                            }
+                        }
+                        KeyCode::Char(c) => {
+                            if let Some(input) = session_input.as_mut() {
+                                input.push(c);
                             }
                         }
                         _ => {}
@@ -782,6 +940,35 @@ fn run_app(
                         KeyCode::Char('x') => return Ok(AppAction::CloseDoc),
                         KeyCode::Char('o') => return Ok(AppAction::OpenZotero),
                         KeyCode::Char('O') => return Ok(AppAction::OpenLatest),
+                        KeyCode::Char('S') => {
+                            if let Some(name) = saved_session_name.as_ref().or(session_name.as_ref()) {
+                                let name = name.clone();
+                                let sess = Session {
+                                    docs: open_docs.iter().map(|d| SessionDoc {
+                                        path: d.path.clone(),
+                                        scroll: d.scroll,
+                                        zoom: d.zoom,
+                                    }).collect(),
+                                    current: current_idx,
+                                };
+                                match save_session(&name, &sess) {
+                                    Ok(_) => {
+                                        status_message = Some((
+                                            format!("Session '{}' saved", name),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        status_message = Some((
+                                            format!("Failed to save session: {}", e),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                            } else {
+                                session_input = Some(String::new());
+                            }
+                        }
                         KeyCode::Tab => {
                             if open_docs.len() > 1 {
                                 let next = (current_idx + 1) % open_docs.len();

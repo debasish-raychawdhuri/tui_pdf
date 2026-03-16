@@ -23,6 +23,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Fit to width** — resize zoom to fit the page width to the terminal (`w`)
 - **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer)
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
+- **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
 
 ## Requirements
 
@@ -84,6 +85,9 @@ tui-pdf --setup-zotero ~/Zotero
 
 # Forward search (send from editor to a running instance):
 tui-pdf --forward line:col:texfile path-to-pdf
+
+# Restore a saved session:
+tui-pdf --session mysession
 ```
 
 ### Keybindings
@@ -112,6 +116,7 @@ tui-pdf --forward line:col:texfile path-to-pdf
 | `o` | Open Zotero browser |
 | `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
 | `Tab` | Switch between open documents |
+| `S` | Save session (prompts for name, or saves to current session) |
 | `x` | Close current document |
 | `q` / `Esc` | Quit |
 | Mouse wheel | Scroll up/down |

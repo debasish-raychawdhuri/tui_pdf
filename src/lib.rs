@@ -9,7 +9,7 @@ pub mod toc;
 pub mod widget;
 pub mod zotero;
 
-pub use config::{load_config, save_config, Config};
+pub use config::{load_config, save_config, load_session, save_session, list_sessions, Config, Session, SessionDoc};
 pub use document::Document;
 pub use error::{Result, TuiPdfError};
 pub use links::LinkState;
