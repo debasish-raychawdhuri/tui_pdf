@@ -2,6 +2,13 @@
 set -euo pipefail
 
 # Detect package manager and install system dependencies for tui-pdf
+#
+# Required by:
+#   clang/libclang  - bindgen (used by mupdf-sys)
+#   chafa           - ratatui-image terminal graphics
+#   freetype        - font rendering
+#   fontconfig      - font discovery
+#   sqlite          - rusqlite (bundled, but headers needed)
 
 install_debian() {
     echo "Detected Debian/Ubuntu-based system"
@@ -9,11 +16,10 @@ install_debian() {
     sudo apt-get install -y \
         build-essential \
         pkg-config \
+        libclang-dev \
         libchafa-dev \
         libfreetype6-dev \
-        libfontconfig1-dev \
-        libmupdf-dev \
-        libsqlite3-dev
+        libfontconfig1-dev
 }
 
 install_arch() {
@@ -21,10 +27,10 @@ install_arch() {
     sudo pacman -Sy --needed --noconfirm \
         base-devel \
         pkgconf \
+        clang \
         chafa \
         freetype2 \
-        fontconfig \
-        sqlite
+        fontconfig
 }
 
 install_fedora() {
@@ -34,10 +40,10 @@ install_fedora() {
         gcc-c++ \
         make \
         pkg-config \
+        clang-devel \
         chafa-devel \
         freetype-devel \
-        fontconfig-devel \
-        sqlite-devel
+        fontconfig-devel
 }
 
 install_suse() {
@@ -47,10 +53,10 @@ install_suse() {
         gcc-c++ \
         make \
         pkg-config \
+        clang-devel \
         chafa-devel \
         freetype2-devel \
-        fontconfig-devel \
-        sqlite3-devel
+        fontconfig-devel
 }
 
 if [ -f /etc/os-release ]; then
@@ -74,12 +80,12 @@ if [ -f /etc/os-release ]; then
                 *)
                     echo "Unsupported distribution: $ID"
                     echo "Please install these packages manually:"
-                    echo "  - C compiler and build tools"
+                    echo "  - C/C++ compiler and build tools"
                     echo "  - pkg-config"
+                    echo "  - clang / libclang (for bindgen)"
                     echo "  - libchafa (development headers)"
                     echo "  - freetype (development headers)"
                     echo "  - fontconfig (development headers)"
-                    echo "  - sqlite3 (development headers)"
                     exit 1
                     ;;
             esac
