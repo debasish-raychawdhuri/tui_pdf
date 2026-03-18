@@ -23,12 +23,11 @@ use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
     ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
-    load_session, save_session, list_sessions, lookup_by_path, Session, SessionDoc,
+    load_session, save_session, list_sessions, move_sessions_dir, lookup_by_path, Session, SessionDoc,
 };
 
 fn render_metadata_overlay(
     fields: &[(String, String)],
-    title_text: &str,
     area: ratatui::layout::Rect,
     buf: &mut ratatui::buffer::Buffer,
 ) {
@@ -36,7 +35,7 @@ fn render_metadata_overlay(
     let title_area = ratatui::layout::Rect {
         x: area.x, y: area.y, width: area.width, height: 1,
     };
-    Paragraph::new(Span::styled(title_text, title_style))
+    Paragraph::new(Span::styled(" Zotero Metadata (Esc/m: close) ", title_style))
         .style(title_style)
         .render(title_area, buf);
 
@@ -80,6 +79,17 @@ fn render_metadata_overlay(
             Paragraph::new(line).render(line_area, buf);
             row += 1;
         }
+    }
+}
+
+fn build_session(open_docs: &[OpenDoc], current_idx: usize, pdf_state: &PdfViewState) -> Session {
+    Session {
+        docs: open_docs.iter().enumerate().map(|(i, d)| SessionDoc {
+            path: d.path.clone(),
+            scroll: if i == current_idx { pdf_state.global_scroll } else { d.scroll },
+            zoom: if i == current_idx { pdf_state.zoom } else { d.zoom },
+        }).collect(),
+        current: current_idx,
     }
 }
 
@@ -163,6 +173,7 @@ OPTIONS:
     --list-sessions             List all saved sessions
     --zotero                    Browse Zotero library and open a PDF
     --setup-zotero <dir>        Configure Zotero data directory (one-time)
+    --move-sessions <dir>       Move session storage to a custom directory
     --forward <line:col:file> <pdf>
                                 Send forward search to a running instance
 
@@ -256,6 +267,17 @@ fn main() -> io::Result<()> {
             std::process::exit(1);
         });
         eprintln!("Zotero directory saved. You can now use: tui-pdf --zotero");
+        std::process::exit(0);
+    }
+
+    // Handle --move-sessions: move session storage to a custom directory
+    if args.len() >= 3 && args[1] == "--move-sessions" {
+        let dir = &args[2];
+        move_sessions_dir(dir).unwrap_or_else(|e| {
+            eprintln!("Failed to move sessions: {e}");
+            std::process::exit(1);
+        });
+        println!("Sessions moved to {}", dir);
         std::process::exit(0);
     }
 
@@ -586,7 +608,6 @@ fn run_app(
             if let Some(ref fields) = metadata_view {
                 render_metadata_overlay(
                     fields,
-                    " Zotero Metadata (Esc: close) ",
                     main_area,
                     frame.buffer_mut(),
                 );
@@ -829,14 +850,7 @@ fn run_app(
                             if let Some(name) = session_input.take() {
                                 let name = name.trim().to_string();
                                 if !name.is_empty() {
-                                    let sess = Session {
-                                        docs: open_docs.iter().map(|d| SessionDoc {
-                                            path: d.path.clone(),
-                                            scroll: d.scroll,
-                                            zoom: d.zoom,
-                                        }).collect(),
-                                        current: current_idx,
-                                    };
+                                    let sess = build_session(&open_docs, current_idx, &pdf_state);
                                     match save_session(&name, &sess) {
                                         Ok(_) => {
                                             status_message = Some((
@@ -1020,14 +1034,7 @@ fn run_app(
                         KeyCode::Char('S') => {
                             if let Some(name) = saved_session_name.as_ref().or(session_name.as_ref()) {
                                 let name = name.clone();
-                                let sess = Session {
-                                    docs: open_docs.iter().map(|d| SessionDoc {
-                                        path: d.path.clone(),
-                                        scroll: d.scroll,
-                                        zoom: d.zoom,
-                                    }).collect(),
-                                    current: current_idx,
-                                };
+                                let sess = build_session(&open_docs, current_idx, &pdf_state);
                                 match save_session(&name, &sess) {
                                     Ok(_) => {
                                         status_message = Some((
@@ -1312,7 +1319,6 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
             if let Some(ref fields) = metadata_view {
                 render_metadata_overlay(
                     fields,
-                    " Zotero Metadata (Esc/m: close) ",
                     chunks[1],
                     frame.buffer_mut(),
                 );

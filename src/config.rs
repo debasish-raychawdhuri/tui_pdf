@@ -5,6 +5,7 @@ use std::path::PathBuf;
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
 pub struct Config {
     pub zotero_dir: Option<String>,
+    pub sessions_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -35,7 +36,47 @@ pub fn config_path() -> PathBuf {
 }
 
 fn sessions_dir() -> PathBuf {
-    config_dir().join("sessions")
+    let config = load_config();
+    if let Some(dir) = config.sessions_dir {
+        PathBuf::from(dir)
+    } else {
+        config_dir().join("sessions")
+    }
+}
+
+pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
+    let new_path = PathBuf::from(new_dir);
+    fs::create_dir_all(&new_path)?;
+    let old_path = {
+        let config = load_config();
+        if let Some(dir) = config.sessions_dir {
+            PathBuf::from(dir)
+        } else {
+            config_dir().join("sessions")
+        }
+    };
+    // Move existing session files
+    if old_path.exists() && old_path != new_path {
+        if let Ok(entries) = fs::read_dir(&old_path) {
+            for entry in entries.flatten() {
+                let src = entry.path();
+                if src.is_file() {
+                    let dest = new_path.join(entry.file_name());
+                    fs::rename(&src, &dest).or_else(|_| {
+                        // rename fails across filesystems, fall back to copy+remove
+                        fs::copy(&src, &dest)?;
+                        fs::remove_file(&src)
+                    })?;
+                }
+            }
+        }
+        // Remove old dir if empty
+        let _ = fs::remove_dir(&old_path);
+    }
+    // Update config
+    let mut config = load_config();
+    config.sessions_dir = Some(new_dir.to_string());
+    save_config(&config)
 }
 
 pub fn session_path(name: &str) -> PathBuf {
