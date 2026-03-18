@@ -24,58 +24,80 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer)
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
+- **Portable sessions** — Zotero PDF paths are stored as portable `zotero://` URIs, so sessions synced via cloud storage work across computers
+- **Shell completions** — tab completion for bash, fish, and zsh
 
 ## Requirements
 
 - A terminal with image support: **Kitty** (recommended), iTerm2, any Sixel-capable terminal, or any terminal for halfblock fallback
 - **Rust** toolchain (stable)
-- **clang** / **libclang** and a C compiler (required to build MuPDF from source)
-
-### Installing build dependencies
-
-**Debian/Ubuntu:**
-```bash
-sudo apt install clang libclang-dev build-essential
-```
-
-**Fedora:**
-```bash
-sudo dnf install clang clang-devel gcc
-```
-
-**macOS:**
-```bash
-xcode-select --install
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S clang
-```
+- System libraries: clang/libclang, chafa, freetype, fontconfig
 
 ## Installation
 
-### From source
+### Quick install (recommended)
+
+The install script handles system dependencies, builds the binary, and sets up shell completions:
 
 ```bash
 git clone https://github.com/debasish-raychawdhuri/tui_pdf.git
 cd tui_pdf
+./install.sh
+```
+
+Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
+
+### Manual install
+
+Install system dependencies for your distro:
+
+```bash
+# Debian/Ubuntu
+sudo apt install build-essential pkg-config libclang-dev libchafa-dev libfreetype6-dev libfontconfig1-dev
+
+# Arch Linux
+sudo pacman -S base-devel pkgconf clang chafa freetype2 fontconfig
+
+# Fedora/RHEL
+sudo dnf install gcc gcc-c++ make pkg-config clang-devel chafa-devel freetype-devel fontconfig-devel
+
+# openSUSE
+sudo zypper install gcc gcc-c++ make pkg-config clang-devel chafa-devel freetype2-devel fontconfig-devel
+```
+
+Then build and install:
+
+```bash
 cargo install --path .
 ```
 
-### Build and run directly
+### Shell completions
+
+If you used `install.sh`, completions are already set up for your shell. To install them manually:
 
 ```bash
-cargo build --release
-./target/release/tui-pdf document.pdf
+# Bash
+tui-pdf --completions bash > ~/.local/share/bash-completion/completions/tui-pdf
+
+# Fish
+tui-pdf --completions fish > ~/.config/fish/completions/tui-pdf.fish
+
+# Zsh (make sure the directory is in your fpath)
+mkdir -p ~/.local/share/zsh/site-functions
+tui-pdf --completions zsh > ~/.local/share/zsh/site-functions/_tui-pdf
 ```
 
-> **Note:** The first build takes a few minutes because MuPDF is compiled from source and statically linked — no runtime dependencies needed.
+Restart your shell or source the completion file to activate.
+
+> **Note:** The first build takes a few minutes because MuPDF is compiled from source and statically linked.
 
 ## Usage
 
 ```bash
 tui-pdf <path-to-pdf>
+
+# Open multiple PDFs:
+tui-pdf paper1.pdf paper2.pdf paper3.pdf
 
 # Browse Zotero library:
 tui-pdf --zotero
@@ -91,6 +113,14 @@ tui-pdf --session mysession
 
 # List saved sessions:
 tui-pdf --list-sessions
+
+# Move session storage to a custom directory (e.g. for cloud sync):
+tui-pdf --move-sessions ~/MEGA/tui-pdf-sessions
+
+# Generate shell completions:
+tui-pdf --completions bash
+tui-pdf --completions fish
+tui-pdf --completions zsh
 ```
 
 ### Keybindings
@@ -167,6 +197,10 @@ tui-pdf --setup-zotero ~/Zotero
 
 Save your workspace with `S` — all open documents, scroll positions, and zoom levels are persisted to a named session file. Restore with `tui-pdf --session <name>`. List saved sessions with `tui-pdf --list-sessions`.
 
+**Custom storage:** Move session files to a cloud-synced directory with `tui-pdf --move-sessions <dir>`. Existing sessions are moved automatically.
+
+**Cross-computer sync:** Zotero PDF paths are stored as portable `zotero://KEY/file.pdf` URIs, so sessions work across computers as long as each machine has `--setup-zotero` configured. Non-Zotero paths remain absolute.
+
 ## Library usage
 
 `tui_pdf` is also a library. You can embed a PDF viewer widget in your own ratatui application:
@@ -176,7 +210,7 @@ use tui_pdf::{Document, PdfViewState, PdfWidget, StatusBar};
 use ratatui_image::picker::Picker;
 
 let document = Document::open("document.pdf")?;
-let picker = Picker::from_query_stdio()?;
+let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
 let mut state = PdfViewState::new(document.page_count(), picker);
 state.initial_render(&document)?;
 

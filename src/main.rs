@@ -174,6 +174,7 @@ OPTIONS:
     --zotero                    Browse Zotero library and open a PDF
     --setup-zotero <dir>        Configure Zotero data directory (one-time)
     --move-sessions <dir>       Move session storage to a custom directory
+    --completions <shell>       Generate shell completions (bash, fish, zsh)
     --forward <line:col:file> <pdf>
                                 Send forward search to a running instance
 
@@ -202,6 +203,82 @@ KEYBINDINGS:
     Ctrl+Click                  SyncTeX reverse search");
 }
 
+fn print_completions_bash() {
+    print!(r#"_tui_pdf() {{
+    local cur prev opts
+    COMPREPLY=()
+    cur="${{COMP_WORDS[COMP_CWORD]}}"
+    prev="${{COMP_WORDS[COMP_CWORD-1]}}"
+    opts="--help --session --list-sessions --zotero --setup-zotero --move-sessions --forward --completions"
+
+    case "$prev" in
+        --session)
+            local sessions
+            sessions=$(tui-pdf --list-sessions 2>/dev/null | grep '^ ' | sed 's/^ *//' | cut -d' ' -f1)
+            COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
+            return 0
+            ;;
+        --setup-zotero|--move-sessions)
+            COMPREPLY=( $(compgen -d -- "$cur") )
+            return 0
+            ;;
+        --completions)
+            COMPREPLY=( $(compgen -W "bash fish zsh" -- "$cur") )
+            return 0
+            ;;
+    esac
+
+    if [[ "$cur" == -* ]]; then
+        COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
+    else
+        COMPREPLY=( $(compgen -f -X '!*.pdf' -- "$cur") $(compgen -d -- "$cur") )
+    fi
+}}
+complete -F _tui_pdf tui-pdf
+"#);
+}
+
+fn print_completions_fish() {
+    print!(r#"complete -c tui-pdf -l help -s h -d 'Show help message'
+complete -c tui-pdf -l session -x -d 'Restore a saved session' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
+complete -c tui-pdf -l list-sessions -d 'List all saved sessions'
+complete -c tui-pdf -l zotero -d 'Browse Zotero library'
+complete -c tui-pdf -l setup-zotero -r -F -d 'Configure Zotero data directory'
+complete -c tui-pdf -l move-sessions -r -F -d 'Move session storage directory'
+complete -c tui-pdf -l forward -x -d 'Send forward search to running instance'
+complete -c tui-pdf -l completions -x -d 'Generate shell completions' -a 'bash fish zsh'
+complete -c tui-pdf -a '(__fish_complete_suffix .pdf)'
+"#);
+}
+
+fn print_completions_zsh() {
+    print!(r#"#compdef tui-pdf
+
+_tui-pdf() {{
+    local -a sessions
+    _arguments -s \
+        '(-h --help)'{{'{{-h,--help}}'}}'[Show help message]' \
+        '--session[Restore a saved session]:session name:->sessions' \
+        '--list-sessions[List all saved sessions]' \
+        '--zotero[Browse Zotero library]' \
+        '--setup-zotero[Configure Zotero data directory]:directory:_directories' \
+        '--move-sessions[Move session storage directory]:directory:_directories' \
+        '--forward[Send forward search]:spec:' \
+        '--completions[Generate shell completions]:shell:(bash fish zsh)' \
+        '*:PDF file:_files -g "*.pdf"'
+
+    case "$state" in
+        sessions)
+            sessions=(${{(f)"$(tui-pdf --list-sessions 2>/dev/null | grep '^ ' | sed 's/^ *//' | cut -d' ' -f1)"}})
+            compadd -a sessions
+            ;;
+    esac
+}}
+
+_tui-pdf "$@"
+"#);
+}
+
 fn main() -> io::Result<()> {
     std::panic::set_hook(Box::new(|info| {
         let msg = format!("PANIC: {info}\n\nBacktrace:\n{}", std::backtrace::Backtrace::force_capture());
@@ -213,6 +290,20 @@ fn main() -> io::Result<()> {
     if args.len() < 2 || args[1] == "--help" || args[1] == "-h" {
         print_help();
         std::process::exit(if args.len() < 2 { 1 } else { 0 });
+    }
+
+    // Handle --completions
+    if args.len() >= 3 && args[1] == "--completions" {
+        match args[2].as_str() {
+            "bash" => print_completions_bash(),
+            "fish" => print_completions_fish(),
+            "zsh" => print_completions_zsh(),
+            other => {
+                eprintln!("Unknown shell: {}. Supported: bash, fish, zsh", other);
+                std::process::exit(1);
+            }
+        }
+        std::process::exit(0);
     }
 
     // Handle --list-sessions
