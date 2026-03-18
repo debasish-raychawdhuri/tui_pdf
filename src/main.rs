@@ -26,6 +26,63 @@ use tui_pdf::{
     load_session, save_session, list_sessions, lookup_by_path, Session, SessionDoc,
 };
 
+fn render_metadata_overlay(
+    fields: &[(String, String)],
+    title_text: &str,
+    area: ratatui::layout::Rect,
+    buf: &mut ratatui::buffer::Buffer,
+) {
+    let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
+    let title_area = ratatui::layout::Rect {
+        x: area.x, y: area.y, width: area.width, height: 1,
+    };
+    Paragraph::new(Span::styled(title_text, title_style))
+        .style(title_style)
+        .render(title_area, buf);
+
+    let label_style = Style::default().fg(Color::Yellow);
+    let value_style = Style::default().fg(Color::White);
+    let max_label = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+    let prefix_width = 2 + max_label + 2; // "  Label: "
+    let value_width = (area.width as usize).saturating_sub(prefix_width);
+    let mut row = area.y + 2;
+    for (label, value) in fields.iter() {
+        if row >= area.y + area.height { break; }
+        let prefix = format!("  {:>width$}: ", label, width = max_label);
+        let lines: Vec<&str> = if value_width > 0 && value.len() > value_width {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            while start < value.len() {
+                let end = (start + value_width).min(value.len());
+                parts.push(&value[start..end]);
+                start = end;
+            }
+            parts
+        } else {
+            vec![value.as_str()]
+        };
+        for (li, line_text) in lines.iter().enumerate() {
+            if row >= area.y + area.height { break; }
+            let line_area = ratatui::layout::Rect {
+                x: area.x, y: row, width: area.width, height: 1,
+            };
+            let line = if li == 0 {
+                Line::from(vec![
+                    Span::styled(prefix.clone(), label_style),
+                    Span::styled(line_text.to_string(), value_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::raw(" ".repeat(prefix_width)),
+                    Span::styled(line_text.to_string(), value_style),
+                ])
+            };
+            Paragraph::new(line).render(line_area, buf);
+            row += 1;
+        }
+    }
+}
+
 enum AppAction {
     Quit,
     OpenZotero,
@@ -527,29 +584,12 @@ fn run_app(
             let status_area = outer[1];
 
             if let Some(ref fields) = metadata_view {
-                // Metadata overlay
-                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-                let title_area = ratatui::layout::Rect {
-                    x: main_area.x, y: main_area.y, width: main_area.width, height: 1,
-                };
-                Paragraph::new(Span::styled(" Zotero Metadata (Esc: close) ", title_style))
-                    .style(title_style)
-                    .render(title_area, frame.buffer_mut());
-
-                let label_style = Style::default().fg(Color::Yellow);
-                let value_style = Style::default().fg(Color::White);
-                for (i, (label, value)) in fields.iter().enumerate() {
-                    let row = main_area.y + 2 + i as u16;
-                    if row >= main_area.y + main_area.height { break; }
-                    let area = ratatui::layout::Rect {
-                        x: main_area.x, y: row, width: main_area.width, height: 1,
-                    };
-                    let line = Line::from(vec![
-                        Span::styled(format!("  {}: ", label), label_style),
-                        Span::styled(value.clone(), value_style),
-                    ]);
-                    Paragraph::new(line).render(area, frame.buffer_mut());
-                }
+                render_metadata_overlay(
+                    fields,
+                    " Zotero Metadata (Esc: close) ",
+                    main_area,
+                    frame.buffer_mut(),
+                );
             } else if doc_picker.is_some() {
                 // Document picker: render list in main area
                 let sel = doc_picker.unwrap();
@@ -1270,29 +1310,12 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
             }
 
             if let Some(ref fields) = metadata_view {
-                // Metadata overlay
-                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-                let title_area = ratatui::layout::Rect {
-                    x: chunks[1].x, y: chunks[1].y, width: chunks[1].width, height: 1,
-                };
-                Paragraph::new(Span::styled(" Zotero Metadata (Esc/m: close) ", title_style))
-                    .style(title_style)
-                    .render(title_area, frame.buffer_mut());
-
-                let label_style = Style::default().fg(Color::Yellow);
-                let value_style = Style::default().fg(Color::White);
-                for (i, (label, value)) in fields.iter().enumerate() {
-                    let row = chunks[1].y + 2 + i as u16;
-                    if row >= chunks[1].y + chunks[1].height { break; }
-                    let area = ratatui::layout::Rect {
-                        x: chunks[1].x, y: row, width: chunks[1].width, height: 1,
-                    };
-                    let line = Line::from(vec![
-                        Span::styled(format!("  {}: ", label), label_style),
-                        Span::styled(value.clone(), value_style),
-                    ]);
-                    Paragraph::new(line).render(area, frame.buffer_mut());
-                }
+                render_metadata_overlay(
+                    fields,
+                    " Zotero Metadata (Esc/m: close) ",
+                    chunks[1],
+                    frame.buffer_mut(),
+                );
             } else {
                 // List
                 let list_height = chunks[1].height as usize;
