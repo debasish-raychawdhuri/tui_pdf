@@ -20,7 +20,7 @@ pub fn flatten_outlines(outlines: &[mupdf::Outline]) -> Vec<TocEntry> {
             let title = outline.title.replace('\r', " ").replace('\n', " ");
             entries.push(TocEntry {
                 title,
-                page: outline.page,
+                page: outline.dest.map(|d| d.loc.page_number),
                 depth,
             });
             if !outline.down.is_empty() {

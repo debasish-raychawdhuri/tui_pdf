@@ -80,6 +80,6 @@ impl Document {
     /// Search for `needle` on a given page, returning bounding quads for each match.
     pub fn search_page(&self, index: usize, needle: &str, hit_max: u32) -> Result<Vec<mupdf::Quad>> {
         let page = self.page(index)?;
-        Ok(page.search(needle, hit_max)?)
+        Ok(page.search(needle, hit_max)?.to_vec())
     }
 }

@@ -388,7 +388,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             }
         };
 
-        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::from_fontsize((8, 16)));
+        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         picker.set_background_color([0, 0, 0, 255]);
 
         let mut pdf_state = PdfViewState::new(document.page_count(), picker);

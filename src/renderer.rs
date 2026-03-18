@@ -71,7 +71,7 @@ pub fn decode_png(data: &[u8]) -> DynamicImage {
 
 fn pixmap_to_image(page: &mupdf::Page, matrix: &Matrix) -> Result<DynamicImage> {
     // alpha=0.0 renders onto an opaque white background (RGB, 3 bytes/pixel)
-    let pixmap = page.to_pixmap(matrix, &mupdf::Colorspace::device_rgb(), 0.0, true)?;
+    let pixmap = page.to_pixmap(matrix, &mupdf::Colorspace::device_rgb(), false, true)?;
 
     let width = pixmap.width() as u32;
     let height = pixmap.height() as u32;

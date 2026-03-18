@@ -30,7 +30,10 @@ pub fn extract_links(document: &Document, page_index: usize) -> Result<Vec<PageL
     let page_count = document.page_count();
 
     for (i, link) in links.iter().enumerate() {
-        let target = link.page as usize;
+        let target = match &link.dest {
+            Some(d) => d.loc.page_number as usize,
+            None => continue,
+        };
         // Only keep internal links within the document
         if target < page_count {
             result.push(PageLink {
