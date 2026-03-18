@@ -38,19 +38,9 @@ install_zsh_completions() {
     echo "  (Make sure $dir is in your fpath)"
 }
 
-# Detect current shell and install appropriate completions
-current_shell="$(basename "${SHELL:-}")"
-case "$current_shell" in
-    bash) install_bash_completions ;;
-    fish) install_fish_completions ;;
-    zsh)  install_zsh_completions ;;
-    *)
-        echo "  Unknown shell: $current_shell — installing all completions"
-        install_bash_completions
-        install_fish_completions
-        install_zsh_completions
-        ;;
-esac
+install_bash_completions
+install_fish_completions
+install_zsh_completions
 
 echo ""
 echo "Done! Restart your shell or source the completions to activate."
