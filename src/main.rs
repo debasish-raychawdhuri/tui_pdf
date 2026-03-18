@@ -189,6 +189,7 @@ KEYBINDINGS:
     l                           Enter link mode (j/k: select, Enter: follow)
     b                           Go back after following a link
     i                           Toggle color inversion
+    m                           Show Zotero metadata for current PDF
     s                           SyncTeX probe (keyboard reverse search)
     o                           Open Zotero browser
     O                           Open latest Zotero PDF
