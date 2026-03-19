@@ -35,7 +35,7 @@ fn render_metadata_overlay(
     let title_area = ratatui::layout::Rect {
         x: area.x, y: area.y, width: area.width, height: 1,
     };
-    Paragraph::new(Span::styled(" Zotero Metadata (Esc/m: close) ", title_style))
+    Paragraph::new(Span::styled(" Zotero Metadata (c: copy BibTeX | Esc/m: close) ", title_style))
         .style(title_style)
         .render(title_area, buf);
 
@@ -115,8 +115,38 @@ fn metadata_fields(entry: &ZoteroEntry) -> Vec<(String, String)> {
     if !entry.doi.is_empty() {
         fields.push(("DOI".to_string(), entry.doi.clone()));
     }
+    if !entry.url.is_empty() {
+        fields.push(("URL".to_string(), entry.url.clone()));
+    }
     fields.push(("File".to_string(), entry.pdf_path.display().to_string()));
+    fields.push(("BibTeX".to_string(), entry.to_bibtex()));
     fields
+}
+
+fn copy_to_clipboard(text: &str) -> io::Result<()> {
+    use std::process::{Command, Stdio};
+    // Try xclip, xsel, wl-copy in order
+    let candidates = [
+        ("xclip", &["-selection", "clipboard"] as &[&str]),
+        ("xsel", &["--clipboard", "--input"]),
+        ("wl-copy", &[]),
+    ];
+    for (cmd, args) in &candidates {
+        if let Ok(mut child) = Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()?;
+            return Ok(());
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::NotFound, "no clipboard tool found"))
 }
 
 enum AppAction {
@@ -1010,9 +1040,22 @@ fn run_app(
                 }
 
                 // Metadata view mode
-                if metadata_view.is_some() {
-                    if key.code == KeyCode::Esc || key.code == KeyCode::Char('m') || key.code == KeyCode::Char('q') {
-                        metadata_view = None;
+                if let Some(ref fields) = metadata_view {
+                    match key.code {
+                        KeyCode::Esc | KeyCode::Char('m') | KeyCode::Char('q') => {
+                            metadata_view = None;
+                        }
+                        KeyCode::Char('c') => {
+                            if let Some((_, bib)) = fields.iter().find(|(k, _)| k == "BibTeX") {
+                                if copy_to_clipboard(bib).is_ok() {
+                                    status_message = Some(("BibTeX copied to clipboard".to_string(), Instant::now()));
+                                } else {
+                                    status_message = Some(("Failed to copy (install xclip or xsel)".to_string(), Instant::now()));
+                                }
+                                metadata_view = None;
+                            }
+                        }
+                        _ => {}
                     }
                     continue;
                 }
@@ -1580,8 +1623,13 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                // Metadata view: any key closes it
-                if metadata_view.is_some() {
+                // Metadata view: c to copy BibTeX, any other key closes
+                if let Some(ref fields) = metadata_view {
+                    if key.code == KeyCode::Char('c') {
+                        if let Some((_, bib)) = fields.iter().find(|(k, _)| k == "BibTeX") {
+                            let _ = copy_to_clipboard(bib);
+                        }
+                    }
                     metadata_view = None;
                     continue;
                 }

@@ -14,7 +14,90 @@ pub struct ZoteroEntry {
     pub volume: String,
     pub issue: String,
     pub pages: String,
+    pub item_type: String,
+    pub url: String,
     pub pdf_path: PathBuf,
+}
+
+impl ZoteroEntry {
+    /// Generate a BibTeX entry from this Zotero metadata.
+    pub fn to_bibtex(&self) -> String {
+        let bib_type = match self.item_type.as_str() {
+            "journalArticle" => "article",
+            "conferencePaper" => "inproceedings",
+            "book" => "book",
+            "bookSection" => "incollection",
+            "preprint" => "misc",
+            _ => "misc",
+        };
+
+        // Build citation key: LastName + Year + first significant title word
+        let cite_key = {
+            let last = self.authors.split(',').next().unwrap_or("unknown")
+                .split_whitespace().last().unwrap_or("unknown")
+                .to_lowercase();
+            let word = self.title.split_whitespace()
+                .find(|w| w.len() > 3 && !["the", "and", "for", "from", "with"].contains(&w.to_lowercase().as_str()))
+                .unwrap_or("untitled")
+                .to_lowercase()
+                .chars().filter(|c| c.is_alphanumeric()).collect::<String>();
+            let y = if self.year.is_empty() { "nd" } else { &self.year };
+            format!("{}{}{}", last, y, word)
+        };
+
+        // Convert "First Last, First Last" to "Last, First and Last, First"
+        let bib_authors: Vec<String> = self.authors.split(", ")
+            .map(|a| {
+                let parts: Vec<&str> = a.rsplitn(2, ' ').collect();
+                if parts.len() == 2 { format!("{}, {}", parts[0], parts[1]) }
+                else { a.to_string() }
+            })
+            .collect();
+        let bib_authors = bib_authors.join(" and ");
+
+        let mut lines = vec![
+            format!("@{}{{{},", bib_type, cite_key),
+            format!("  title = {{{}}},", self.title),
+            format!("  author = {{{}}},", bib_authors),
+        ];
+        if !self.year.is_empty() {
+            lines.push(format!("  year = {{{}}},", self.year));
+        }
+        match bib_type {
+            "article" => {
+                if !self.publication.is_empty() {
+                    lines.push(format!("  journal = {{{}}},", self.publication));
+                }
+            }
+            "inproceedings" | "incollection" => {
+                if !self.publication.is_empty() {
+                    lines.push(format!("  booktitle = {{{}}},", self.publication));
+                }
+            }
+            _ => {
+                if !self.publication.is_empty() {
+                    lines.push(format!("  howpublished = {{{}}},", self.publication));
+                }
+            }
+        }
+        if !self.volume.is_empty() {
+            lines.push(format!("  volume = {{{}}},", self.volume));
+        }
+        if !self.issue.is_empty() {
+            lines.push(format!("  number = {{{}}},", self.issue));
+        }
+        if !self.pages.is_empty() {
+            lines.push(format!("  pages = {{{}}},", self.pages));
+        }
+        if !self.doi.is_empty() {
+            lines.push(format!("  doi = {{{}}},", self.doi));
+        }
+        if !self.url.is_empty() {
+            lines.push(format!("  url = {{{}}},", self.url));
+        }
+        lines.push("}".to_string());
+        lines.join("\n")
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -175,6 +258,12 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
          WHERE id.itemID = ?1 AND f.fieldName = ?2"
     )?;
 
+    let mut type_stmt = conn.prepare(
+        "SELECT it.typeName FROM items i
+         JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+         WHERE i.itemID = ?"
+    )?;
+
     let storage_dir = zotero_dir.join("storage");
     let mut entries = Vec::new();
 
@@ -241,6 +330,11 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
             publication
         };
 
+        let url = get_field("url");
+        let item_type: String = type_stmt
+            .query_row([parent_id], |row| row.get(0))
+            .unwrap_or_default();
+
         entries.push(ZoteroEntry {
             item_id: *parent_id,
             title,
@@ -251,6 +345,8 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
             volume: get_field("volume"),
             issue: get_field("issue"),
             pages: get_field("pages"),
+            item_type,
+            url,
             pdf_path,
         });
     }
@@ -368,6 +464,13 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         publication
     };
 
+    let item_type: String = conn.query_row(
+        "SELECT it.typeName FROM items i
+         JOIN itemTypes it ON it.itemTypeID = i.itemTypeID
+         WHERE i.itemID = ?",
+        [parent_id], |row| row.get(0),
+    ).unwrap_or_default();
+
     Some(ZoteroEntry {
         item_id: parent_id,
         title,
@@ -378,6 +481,8 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         volume: get_field("volume"),
         issue: get_field("issue"),
         pages: get_field("pages"),
+        item_type,
+        url: get_field("url"),
         pdf_path: pdf_path.to_path_buf(),
     })
 }
