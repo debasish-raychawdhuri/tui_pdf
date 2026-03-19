@@ -8,7 +8,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 ## Features
 
 - **High-quality rendering** — PDF pages rendered at 192 DPI via MuPDF, displayed using your terminal's native image protocol (Kitty, Sixel, iTerm2, or halfblock fallback)
-- **Smooth scrolling** — continuous vertical scrolling across pages with stripe-based rendering
+- **Smooth scrolling** — continuous vertical scrolling across pages with stripe-based rendering and visible page gap separators
 - **Text search** — incremental search across the entire document with highlighted matches (`/` to search, `n`/`p` to navigate results)
 - **Table of contents** — side panel showing document outline with jump-to-page (`t`)
 - **Link navigation** — follow internal PDF links and navigate back (`l` to enter link mode, `b` to go back)
@@ -21,7 +21,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **SyncTeX forward search** — integrates with texlab LSP to scroll the PDF to the source position (`tui-pdf --forward line:col:file doc.pdf`)
 - **Mouse wheel scrolling** — scroll through the document with the mouse wheel
 - **Fit to width** — resize zoom to fit the page width to the terminal (`w`)
-- **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer)
+- **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer), view metadata (`m`), and copy BibTeX to clipboard (`c`)
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
 - **Portable sessions** — Zotero PDF paths are stored as portable `zotero://` URIs, so sessions synced via cloud storage work across computers
@@ -147,6 +147,7 @@ tui-pdf --completions zsh
 | `w` | Fit to width |
 | `i` | Toggle color inversion |
 | `m` | Show Zotero metadata for current document |
+| `c` (in metadata view) | Copy BibTeX to clipboard |
 | `o` | Open Zotero browser |
 | `O` | Open latest Zotero PDF |
 | `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
@@ -189,7 +190,7 @@ tui-pdf --setup-zotero ~/Zotero
 
 **Browse library:** Launch with `tui-pdf --zotero` or press `o` from within the viewer. The browser shows your collection hierarchy — navigate into collections with `Enter`, go back with `Backspace`, and type to filter by title/author/year. Select a paper and press `Enter` to open it. Press `m` on a paper to view its metadata.
 
-**Metadata:** Press `m` in the viewer or the Zotero browser to see the title, authors, year, and file path for the current document (looked up from the Zotero database).
+**Metadata & BibTeX:** Press `m` in the viewer or the Zotero browser to see the title, authors, year, publication details, DOI, URL, and file path for the current document (looked up from the Zotero database). The metadata view also shows the generated BibTeX entry. Press `c` to copy the BibTeX to your clipboard (requires `xclip`, `xsel`, or `wl-copy`).
 
 **Virtual tabs:** Documents you open are remembered with their scroll position and zoom level. Press `Tab` to cycle between them. Documents are reopened on switch rather than kept in memory, so there is no overhead.
 
