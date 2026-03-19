@@ -500,9 +500,88 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
 
         let mut document = match Document::open(&current_path) {
             Ok(d) => d,
-            Err(e) => {
-                eprintln!("Failed to open PDF: {e}");
-                break;
+            Err(_) => {
+                // Show "file not available" screen until user switches or quits
+                let result: io::Result<AppAction> = loop {
+                    terminal.draw(|frame| {
+                        let area = frame.area();
+                        let filename = std::path::Path::new(&current_path)
+                            .file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_else(|| current_path.clone());
+                        let msg = format!("File not available: {}", filename);
+                        let style = Style::default().fg(Color::Red);
+                        let para = Paragraph::new(Line::from(Span::styled(msg, style)));
+                        para.render(area, frame.buffer_mut());
+                        // Status bar
+                        let status_area = ratatui::layout::Rect {
+                            x: area.x, y: area.y + area.height.saturating_sub(1),
+                            width: area.width, height: 1,
+                        };
+                        let status = Paragraph::new(Span::styled(
+                            " Tab: switch doc | d: doc picker | q: quit ",
+                            Style::default().fg(Color::Black).bg(Color::Cyan),
+                        )).style(Style::default().bg(Color::Cyan));
+                        status.render(status_area, frame.buffer_mut());
+                    })?;
+                    if event::poll(Duration::from_millis(100))? {
+                        if let Event::Key(key) = event::read()? {
+                            if key.kind != KeyEventKind::Press { continue; }
+                            match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => break Ok(AppAction::Quit),
+                                KeyCode::Tab => {
+                                    let next = (current_idx + 1) % open_docs.len();
+                                    break Ok(AppAction::SwitchDoc(next));
+                                }
+                                KeyCode::BackTab => {
+                                    let next = if current_idx == 0 { open_docs.len() - 1 } else { current_idx - 1 };
+                                    break Ok(AppAction::SwitchDoc(next));
+                                }
+                                KeyCode::Char('d') => {
+                                    break Ok(AppAction::SwitchDoc(current_idx));
+                                }
+                                KeyCode::Char('o') => break Ok(AppAction::OpenZotero),
+                                KeyCode::Char('O') => break Ok(AppAction::OpenLatest),
+                                _ => {}
+                            }
+                        }
+                    }
+                };
+                match result {
+                    Ok(AppAction::Quit) => break,
+                    Ok(AppAction::SwitchDoc(idx)) => {
+                        if idx < open_docs.len() {
+                            current_path = open_docs[idx].path.clone();
+                        }
+                    }
+                    Ok(AppAction::OpenZotero) => {
+                        if let Some(ref dir) = zotero_dir {
+                            if let Ok(lib) = load_library(std::path::Path::new(dir)) {
+                                let _ = stdout().execute(DisableMouseCapture);
+                                let _ = stdout().execute(LeaveAlternateScreen);
+                                let _ = disable_raw_mode();
+                                match run_zotero_browser(&lib) {
+                                    Ok(Some(path)) => {
+                                        current_path = path.to_string_lossy().to_string();
+                                    }
+                                    _ => {}
+                                }
+                                enable_raw_mode()?;
+                                stdout().execute(EnterAlternateScreen)?;
+                                stdout().execute(EnableMouseCapture)?;
+                            }
+                        }
+                    }
+                    Ok(AppAction::OpenLatest) => {
+                        if let Some(ref dir) = zotero_dir {
+                            if let Some(path) = latest_pdf(std::path::Path::new(dir)) {
+                                current_path = path.to_string_lossy().to_string();
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                continue;
             }
         };
 

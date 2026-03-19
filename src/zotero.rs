@@ -231,7 +231,12 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
         let publication = get_field("publicationTitle");
         let publication = if publication.is_empty() {
             let conf = get_field("conferenceName");
-            if conf.is_empty() { get_field("proceedingsTitle") } else { conf }
+            if !conf.is_empty() { conf }
+            else {
+                let proc = get_field("proceedingsTitle");
+                if !proc.is_empty() { proc }
+                else { get_field("bookTitle") }
+            }
         } else {
             publication
         };
