@@ -21,7 +21,7 @@ use ratatui_image::picker::Picker;
 
 use tui_pdf::{
     Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
-    ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
+    ZoteroEntry, ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
     load_session, save_session, list_sessions, move_sessions_dir, lookup_by_path, Session, SessionDoc,
 };
@@ -91,6 +91,32 @@ fn build_session(open_docs: &[OpenDoc], current_idx: usize, pdf_state: &PdfViewS
         }).collect(),
         current: current_idx,
     }
+}
+
+fn metadata_fields(entry: &ZoteroEntry) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("Title".to_string(), entry.title.clone()),
+        ("Authors".to_string(), entry.authors.clone()),
+    ];
+    if !entry.year.is_empty() {
+        fields.push(("Year".to_string(), entry.year.clone()));
+    }
+    if !entry.publication.is_empty() {
+        let mut pub_str = entry.publication.clone();
+        let mut details = Vec::new();
+        if !entry.volume.is_empty() { details.push(format!("Vol. {}", entry.volume)); }
+        if !entry.issue.is_empty() { details.push(format!("No. {}", entry.issue)); }
+        if !entry.pages.is_empty() { details.push(format!("pp. {}", entry.pages)); }
+        if !details.is_empty() {
+            pub_str.push_str(&format!(", {}", details.join(", ")));
+        }
+        fields.push(("Published in".to_string(), pub_str));
+    }
+    if !entry.doi.is_empty() {
+        fields.push(("DOI".to_string(), entry.doi.clone()));
+    }
+    fields.push(("File".to_string(), entry.pdf_path.display().to_string()));
+    fields
 }
 
 enum AppAction {
@@ -1166,15 +1192,7 @@ fn run_app(
                                     std::path::Path::new(dir),
                                     document.path(),
                                 ) {
-                                    let mut fields = vec![
-                                        ("Title".to_string(), entry.title),
-                                        ("Authors".to_string(), entry.authors),
-                                    ];
-                                    if !entry.year.is_empty() {
-                                        fields.push(("Year".to_string(), entry.year));
-                                    }
-                                    fields.push(("File".to_string(), entry.pdf_path.display().to_string()));
-                                    metadata_view = Some(fields);
+                                    metadata_view = Some(metadata_fields(&entry));
                                 } else {
                                     status_message = Some((
                                         "No Zotero metadata found for this file".to_string(),
@@ -1533,15 +1551,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                         if let Some(item) = items.get(selected) {
                             if let BrowserItem::Paper { entry_idx } = item {
                                 let e = &library.entries[*entry_idx];
-                                let mut fields = vec![
-                                    ("Title".to_string(), e.title.clone()),
-                                    ("Authors".to_string(), e.authors.clone()),
-                                ];
-                                if !e.year.is_empty() {
-                                    fields.push(("Year".to_string(), e.year.clone()));
-                                }
-                                fields.push(("File".to_string(), e.pdf_path.display().to_string()));
-                                metadata_view = Some(fields);
+                                metadata_view = Some(metadata_fields(e));
                             }
                         }
                     }

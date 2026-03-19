@@ -9,6 +9,11 @@ pub struct ZoteroEntry {
     pub title: String,
     pub authors: String,
     pub year: String,
+    pub publication: String,
+    pub doi: String,
+    pub volume: String,
+    pub issue: String,
+    pub pages: String,
     pub pdf_path: PathBuf,
 }
 
@@ -149,7 +154,8 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
         "SELECT c.firstName, c.lastName
          FROM itemCreators ic
          JOIN creators c ON c.creatorID = ic.creatorID
-         WHERE ic.itemID = ?
+         JOIN creatorTypes ct ON ct.creatorTypeID = ic.creatorTypeID
+         WHERE ic.itemID = ? AND ct.creatorType = 'author'
          ORDER BY ic.orderIndex"
     )?;
 
@@ -159,6 +165,14 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
          JOIN itemDataValues idv ON idv.valueID = id.valueID
          JOIN fields f ON f.fieldID = id.fieldID
          WHERE id.itemID = ? AND f.fieldName = 'date'"
+    )?;
+
+    let mut field_stmt = conn.prepare(
+        "SELECT idv.value
+         FROM itemData id
+         JOIN itemDataValues idv ON idv.valueID = id.valueID
+         JOIN fields f ON f.fieldID = id.fieldID
+         WHERE id.itemID = ?1 AND f.fieldName = ?2"
     )?;
 
     let storage_dir = zotero_dir.join("storage");
@@ -209,11 +223,29 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
             continue;
         }
 
+        let mut get_field = |name: &str| -> String {
+            field_stmt.query_row(rusqlite::params![parent_id, name], |row| row.get(0))
+                .unwrap_or_default()
+        };
+
+        let publication = get_field("publicationTitle");
+        let publication = if publication.is_empty() {
+            let conf = get_field("conferenceName");
+            if conf.is_empty() { get_field("proceedingsTitle") } else { conf }
+        } else {
+            publication
+        };
+
         entries.push(ZoteroEntry {
             item_id: *parent_id,
             title,
             authors,
             year,
+            publication,
+            doi: get_field("DOI"),
+            volume: get_field("volume"),
+            issue: get_field("issue"),
+            pages: get_field("pages"),
             pdf_path,
         });
     }
@@ -285,7 +317,8 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         "SELECT c.firstName, c.lastName
          FROM itemCreators ic
          JOIN creators c ON c.creatorID = ic.creatorID
-         WHERE ic.itemID = ?
+         JOIN creatorTypes ct ON ct.creatorTypeID = ic.creatorTypeID
+         WHERE ic.itemID = ? AND ct.creatorType = 'author'
          ORDER BY ic.orderIndex"
     ).ok()?;
     let authors: Vec<String> = author_stmt
@@ -307,11 +340,39 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
     ).unwrap_or_default();
     let year = year.chars().take(4).collect::<String>();
 
+    let get_field = |name: &str| -> String {
+        conn.query_row(
+            "SELECT idv.value FROM itemData id
+             JOIN itemDataValues idv ON idv.valueID = id.valueID
+             JOIN fields f ON f.fieldID = id.fieldID
+             WHERE id.itemID = ?1 AND f.fieldName = ?2",
+            rusqlite::params![parent_id, name], |row| row.get(0),
+        ).unwrap_or_default()
+    };
+
+    let publication = get_field("publicationTitle");
+    let publication = if publication.is_empty() {
+        let conf = get_field("conferenceName");
+        if !conf.is_empty() { conf }
+        else {
+            let proc = get_field("proceedingsTitle");
+            if !proc.is_empty() { proc }
+            else { get_field("bookTitle") }
+        }
+    } else {
+        publication
+    };
+
     Some(ZoteroEntry {
         item_id: parent_id,
         title,
         authors,
         year,
+        publication,
+        doi: get_field("DOI"),
+        volume: get_field("volume"),
+        issue: get_field("issue"),
+        pages: get_field("pages"),
         pdf_path: pdf_path.to_path_buf(),
     })
 }
