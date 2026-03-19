@@ -18,6 +18,9 @@ use crate::renderer::{
 };
 use crate::search::SearchState;
 
+/// Number of blank terminal rows inserted between consecutive pages.
+const PAGE_GAP: usize = 1;
+
 /// 5x7 bitmap font for digits 0-9.
 const DIGIT_W: u32 = 5;
 const DIGIT_H: u32 = 7;
@@ -298,7 +301,8 @@ impl PdfViewState {
             return (0, 0.0);
         }
         let page_base = self.cumulative_stripes[page];
-        let local_stripe = self.global_scroll.saturating_sub(page_base);
+        let page_stripes = self.page_stripe_counts.get(page).copied().unwrap_or(0);
+        let local_stripe = self.global_scroll.saturating_sub(page_base).min(page_stripes.saturating_sub(1));
         let font_height = self.picker.font_size().1 as f32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         let pdf_y = (local_stripe as f32 * font_height) / scale;
@@ -333,7 +337,8 @@ impl PdfViewState {
         };
 
         let page_base = self.cumulative_stripes[page_idx];
-        let local_stripe = g - page_base;
+        let page_stripes = self.page_stripe_counts.get(page_idx).copied().unwrap_or(0);
+        let local_stripe = (g - page_base).min(page_stripes.saturating_sub(1));
 
         let font_height = self.picker.font_size().1 as f32;
         let font_width = self.picker.font_size().0 as f32;
@@ -358,6 +363,9 @@ impl PdfViewState {
         self.cumulative_stripes.clear();
         let mut cumulative = 0;
         for i in 0..self.page_count {
+            if i > 0 {
+                cumulative += PAGE_GAP;
+            }
             self.cumulative_stripes.push(cumulative);
             let count = compute_stripe_count(document, i, self.zoom, font_height)?;
             self.page_stripe_counts.push(count);
@@ -880,8 +888,24 @@ impl StatefulWidget for PdfWidget {
             };
 
             let page_base = state.cumulative_stripes[page_idx];
-            let local_stripe = g - page_base;
+            let page_end = page_base + state.page_stripe_counts[page_idx];
 
+            // If g is past the page's stripes, we're in the gap region
+            if g >= page_end {
+                let next_page_start = if page_idx + 1 < state.cumulative_stripes.len() {
+                    state.cumulative_stripes[page_idx + 1]
+                } else {
+                    state.total_stripes
+                };
+                let gap_remaining = next_page_start.saturating_sub(g);
+                let gap_rows = gap_remaining.min(global_end - g);
+                // Leave gap rows as default background (blank)
+                screen_row += gap_rows;
+                g += gap_rows;
+                continue;
+            }
+
+            let local_stripe = g - page_base;
             let stripes_left_in_page = state.page_stripe_counts[page_idx] - local_stripe;
             let rows_left_on_screen = global_end - g;
             let count = stripes_left_in_page.min(rows_left_on_screen);

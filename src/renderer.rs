@@ -41,6 +41,8 @@ pub fn compute_stripe_count(document: &Document, page_index: usize, zoom: f32, f
 }
 
 /// Split an image into horizontal stripes, each `stripe_height` pixels tall.
+/// The last stripe is padded to full height with white so page boundaries
+/// render consistently across documents.
 pub fn split_into_stripes(img: &DynamicImage, stripe_height: u32) -> Vec<DynamicImage> {
     let width = img.width();
     let height = img.height();
@@ -49,7 +51,16 @@ pub fn split_into_stripes(img: &DynamicImage, stripe_height: u32) -> Vec<Dynamic
     while y < height {
         let h = stripe_height.min(height - y);
         let stripe = img.crop_imm(0, y, width, h);
-        stripes.push(stripe);
+        if h < stripe_height {
+            // Pad short last stripe to full height, sampling the background
+            // color from the bottom-left pixel so it works with inverted mode
+            let bg = *img.to_rgb8().get_pixel(0, height - 1);
+            let mut padded = RgbImage::from_pixel(width, stripe_height, bg);
+            image::imageops::overlay(&mut padded, &stripe.to_rgb8(), 0, 0);
+            stripes.push(DynamicImage::ImageRgb8(padded));
+        } else {
+            stripes.push(stripe);
+        }
         y += h;
     }
     stripes
