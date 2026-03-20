@@ -16,6 +16,8 @@ pub struct ZoteroEntry {
     pub pages: String,
     pub item_type: String,
     pub url: String,
+    pub archive: String,
+    pub archive_id: String,
     pub pdf_path: PathBuf,
 }
 
@@ -75,8 +77,20 @@ impl ZoteroEntry {
                 }
             }
             _ => {
-                if !self.publication.is_empty() {
-                    lines.push(format!("  howpublished = {{{}}},", self.publication));
+                // For preprints/misc: use archive name (ePrint, arXiv, etc.)
+                // or fall back to publication if set
+                let howpub = if !self.archive.is_empty() {
+                    Some(self.archive.clone())
+                } else if !self.publication.is_empty() {
+                    Some(self.publication.clone())
+                } else {
+                    None
+                };
+                if let Some(hp) = howpub {
+                    lines.push(format!("  howpublished = {{{}}},", hp));
+                }
+                if !self.archive_id.is_empty() {
+                    lines.push(format!("  note = {{{}}},", self.archive_id));
                 }
             }
         }
@@ -331,6 +345,11 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
         };
 
         let url = get_field("url");
+        let archive = {
+            let a = get_field("archive");
+            if a.is_empty() { get_field("repository") } else { a }
+        };
+        let archive_id = get_field("archiveID");
         let item_type: String = type_stmt
             .query_row([parent_id], |row| row.get(0))
             .unwrap_or_default();
@@ -347,6 +366,8 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
             pages: get_field("pages"),
             item_type,
             url,
+            archive,
+            archive_id,
             pdf_path,
         });
     }
@@ -471,6 +492,11 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         [parent_id], |row| row.get(0),
     ).unwrap_or_default();
 
+    let archive = {
+        let a = get_field("archive");
+        if a.is_empty() { get_field("repository") } else { a }
+    };
+
     Some(ZoteroEntry {
         item_id: parent_id,
         title,
@@ -483,6 +509,8 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         pages: get_field("pages"),
         item_type,
         url: get_field("url"),
+        archive,
+        archive_id: get_field("archiveID"),
         pdf_path: pdf_path.to_path_buf(),
     })
 }
