@@ -20,11 +20,16 @@ use ratatui_image::picker::Picker;
 
 
 use tui_pdf::{
-    Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar, TocState, TocWidget,
+    ContentSource, Document, LinkState, PdfViewState, PdfWidget, SearchState, StatusBar,
+    TocState, TocWidget, capture_url,
     ZoteroEntry, ZoteroLibrary, latest_pdf, load_config, load_library, save_config,
     send_forward, socket_path, synctex_edit, synctex_view, jump_to_neovim,
     load_session, save_session, list_sessions, move_sessions_dir, lookup_by_path, Session, SessionDoc,
 };
+
+fn is_url(s: &str) -> bool {
+    s.starts_with("http://") || s.starts_with("https://")
+}
 
 fn render_metadata_overlay(
     fields: &[(String, String)],
@@ -35,7 +40,7 @@ fn render_metadata_overlay(
     let title_area = ratatui::layout::Rect {
         x: area.x, y: area.y, width: area.width, height: 1,
     };
-    Paragraph::new(Span::styled(" Zotero Metadata (c: copy BibTeX | Esc/m: close) ", title_style))
+    Paragraph::new(Span::styled(" Metadata (c: copy BibTeX | u: open URL | Esc/m: close) ", title_style))
         .style(title_style)
         .render(title_area, buf);
 
@@ -155,6 +160,7 @@ enum AppAction {
     SwitchDoc(usize),
     CloseDoc,
     OpenLatest,
+    OpenUrl(String),
 }
 
 struct ProbeCell {
@@ -218,10 +224,10 @@ fn print_help() {
     println!("tui-pdf — a terminal PDF viewer with image rendering
 
 USAGE:
-    tui-pdf [OPTIONS] <pdf>...
+    tui-pdf [OPTIONS] <pdf|url>...
 
 ARGUMENTS:
-    <pdf>...                    One or more PDF files to open
+    <pdf|url>...                One or more PDF files or URLs to open
 
 OPTIONS:
     -h, --help                  Show this help message
@@ -528,18 +534,35 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         let saved_scroll = open_docs[current_idx].scroll;
         let saved_zoom = open_docs[current_idx].zoom;
 
-        let mut document = match Document::open(&current_path) {
-            Ok(d) => d,
+        // Try to open content source (URL or PDF file)
+        let open_result = if is_url(&current_path) {
+            let _ = terminal.draw(|frame| {
+                let area = frame.area();
+                let msg = format!("Loading {}...", &current_path);
+                Paragraph::new(Span::styled(msg, Style::default().fg(Color::Yellow)))
+                    .render(area, frame.buffer_mut());
+            });
+            capture_url(&current_path).map(ContentSource::Web)
+        } else {
+            Document::open(&current_path).map(ContentSource::Pdf)
+        };
+
+        let mut source = match open_result {
+            Ok(s) => s,
             Err(_) => {
                 // Show "file not available" screen until user switches or quits
                 let result: io::Result<AppAction> = loop {
                     terminal.draw(|frame| {
                         let area = frame.area();
-                        let filename = std::path::Path::new(&current_path)
-                            .file_name()
-                            .map(|f| f.to_string_lossy().to_string())
-                            .unwrap_or_else(|| current_path.clone());
-                        let msg = format!("File not available: {}", filename);
+                        let msg = if is_url(&current_path) {
+                            format!("Failed to load URL: {}", &current_path)
+                        } else {
+                            let filename = std::path::Path::new(&current_path)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                                .unwrap_or_else(|| current_path.clone());
+                            format!("File not available: {}", filename)
+                        };
                         let style = Style::default().fg(Color::Red);
                         let para = Paragraph::new(Line::from(Span::styled(msg, style)));
                         para.render(area, frame.buffer_mut());
@@ -618,29 +641,35 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
         picker.set_background_color([0, 0, 0, 255]);
 
-        let mut pdf_state = PdfViewState::new(document.page_count(), picker);
+        let mut pdf_state = PdfViewState::new(source.page_count(), picker);
         pdf_state.zoom = saved_zoom;
-        if inverted { pdf_state.toggle_invert(&document); }
-        let _ = pdf_state.initial_render(&document);
+        if inverted { pdf_state.toggle_invert(&source); }
+        let _ = pdf_state.initial_render(&source);
         pdf_state.global_scroll = saved_scroll;
 
-        let outlines = document.outlines().unwrap_or_default();
+        let outlines = source.outlines();
         let mut toc_state = TocState::new(&outlines);
         let mut link_state = LinkState::new();
         let mut search_state = SearchState::new();
         let mut goto_input: Option<String> = None;
         let mut search_input: Option<String> = None;
 
-        let sock = socket_path(document.path());
-        let _ = fs::remove_file(&sock);
-        let listener = UnixListener::bind(&sock).ok();
+        // SyncTeX socket only for PDF files
+        let sock = if source.is_pdf() {
+            let s = socket_path(std::path::Path::new(source.path_or_url()));
+            let _ = fs::remove_file(&s);
+            Some(s)
+        } else {
+            None
+        };
+        let listener = sock.as_ref().and_then(|s| UnixListener::bind(s).ok());
         if let Some(ref l) = listener {
             l.set_nonblocking(true).ok();
         }
 
         let result = run_app(
             &mut terminal,
-            &mut document,
+            &mut source,
             &mut pdf_state,
             &mut toc_state,
             &mut link_state,
@@ -654,7 +683,9 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             &zotero_dir,
         );
 
-        let _ = fs::remove_file(&sock);
+        if let Some(ref s) = sock {
+            let _ = fs::remove_file(s);
+        }
 
         // Save state before switching
         open_docs[current_idx].scroll = pdf_state.global_scroll;
@@ -709,6 +740,9 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     }
                 }
             }
+            Ok(AppAction::OpenUrl(url)) => {
+                current_path = url;
+            }
             Err(e) => {
                 let _ = stdout().execute(DisableMouseCapture);
                 let _ = disable_raw_mode();
@@ -726,7 +760,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
 
 fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    document: &mut Document,
+    source: &mut ContentSource,
     pdf_state: &mut PdfViewState,
     toc_state: &mut TocState,
     link_state: &mut LinkState,
@@ -739,10 +773,14 @@ fn run_app(
     session_name: &Option<String>,
     zotero_dir: &Option<String>,
 ) -> io::Result<AppAction> {
-    // Auto-reload state
-    let mut last_mtime: Option<SystemTime> = fs::metadata(document.path())
-        .and_then(|m| m.modified())
-        .ok();
+    // Auto-reload state (PDF only)
+    let mut last_mtime: Option<SystemTime> = if source.is_pdf() {
+        fs::metadata(std::path::Path::new(source.path_or_url()))
+            .and_then(|m| m.modified())
+            .ok()
+    } else {
+        None
+    };
     let mut last_mtime_check = Instant::now();
 
     // Status message (shown temporarily, expires after 3s)
@@ -765,7 +803,7 @@ fn run_app(
     loop {
         // Progress incremental search
         if search_state.searching {
-            let _ = search_state.search_tick(document);
+            let _ = search_state.search_tick(source);
             if !search_state.jumped && !search_state.hits.is_empty() {
                 search_state.jumped = true;
                 search_state.next_hit_from_page(pdf_state.current_page());
@@ -799,7 +837,7 @@ fn run_app(
                             {
                                 let tex_file = parts[2];
                                 if let Some(fwd) =
-                                    synctex_view(document.path(), tex_file, src_line, col)
+                                    synctex_view(std::path::Path::new(source.path_or_url()), tex_file, src_line, col)
                                 {
                                     pdf_state.scroll_to_point(fwd.page, fwd.y);
                                     status_message = Some((
@@ -823,7 +861,7 @@ fn run_app(
         }
 
         // Ensure current page is rendered before draw (avoids blank on uncached pages)
-        pdf_state.ensure_visible_rendered(document);
+        pdf_state.ensure_visible_rendered(source);
 
         let draw_result = terminal.draw(|frame| {
             let outer = Layout::vertical([Constraint::Min(1), Constraint::Length(1)])
@@ -1009,7 +1047,7 @@ fn run_app(
                         if let Some((page, pdf_x, pdf_y)) =
                             pdf_state.terminal_to_pdf(mouse.row, mouse.column)
                         {
-                            match synctex_edit(document.path(), page + 1, pdf_x, pdf_y) {
+                            match synctex_edit(std::path::Path::new(source.path_or_url()), page + 1, pdf_x, pdf_y) {
                                 Some(result) => {
                                     if !jump_to_neovim(&result.file, result.line) {
                                         status_message = Some((
@@ -1053,6 +1091,21 @@ fn run_app(
                                     status_message = Some(("Failed to copy (install xclip or xsel)".to_string(), Instant::now()));
                                 }
                                 metadata_view = None;
+                            }
+                        }
+                        KeyCode::Char('u') => {
+                            let url = fields.iter()
+                                .find(|(k, _)| k == "URL")
+                                .map(|(_, v)| v.clone())
+                                .or_else(|| {
+                                    fields.iter()
+                                        .find(|(k, _)| k == "DOI")
+                                        .map(|(_, v)| format!("https://doi.org/{}", v))
+                                });
+                            if let Some(url) = url {
+                                return Ok(AppAction::OpenUrl(url));
+                            } else {
+                                status_message = Some(("No URL or DOI available".to_string(), Instant::now()));
                             }
                         }
                         _ => {}
@@ -1181,7 +1234,7 @@ fn run_app(
                                     let current_page = pdf_state.current_page();
                                     search_state.start_search(
                                         &query,
-                                        document.page_count(),
+                                        source.page_count(),
                                         current_page,
                                     );
                                 }
@@ -1309,10 +1362,16 @@ fn run_app(
                             doc_picker = Some(current_idx);
                         }
                         KeyCode::Char('m') => {
-                            if let Some(dir) = zotero_dir {
+                            if source.is_web() {
+                                // Show URL info for web pages
+                                let fields = vec![
+                                    ("URL".to_string(), source.path_or_url().to_string()),
+                                ];
+                                metadata_view = Some(fields);
+                            } else if let Some(dir) = zotero_dir {
                                 if let Some(entry) = lookup_by_path(
                                     std::path::Path::new(dir),
-                                    document.path(),
+                                    std::path::Path::new(source.path_or_url()),
                                 ) {
                                     metadata_view = Some(metadata_fields(&entry));
                                 } else {
@@ -1331,7 +1390,7 @@ fn run_app(
                         KeyCode::Char('s') => {
                             if let Some((ax, ay, aw, ah)) = pdf_state.last_render_area {
                                 let area = ratatui::layout::Rect::new(ax, ay, aw, ah);
-                                let grid = compute_probe_grid(pdf_state, document.path(), area);
+                                let grid = compute_probe_grid(pdf_state, std::path::Path::new(source.path_or_url()), area);
                                 if grid.is_empty() {
                                     status_message = Some((
                                         "SyncTeX: no results on visible area".to_string(),
@@ -1365,7 +1424,7 @@ fn run_app(
                         }
                         KeyCode::Char('l') => {
                             let page = pdf_state.current_page();
-                            let _ = link_state.activate(document, page);
+                            let _ = link_state.activate(source, page);
                         }
                         KeyCode::Char('b') => {
                             if let Some(pos) = link_state.pop_position() {
@@ -1398,10 +1457,10 @@ fn run_app(
                         KeyCode::Right | KeyCode::PageDown => pdf_state.next_page(),
                         KeyCode::Char('j') | KeyCode::Down => pdf_state.scroll_down(3),
                         KeyCode::Char('k') | KeyCode::Up => pdf_state.scroll_up(3),
-                        KeyCode::Char('i') => pdf_state.toggle_invert(document),
-                        KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(document),
-                        KeyCode::Char('-') => pdf_state.zoom_out(document),
-                        KeyCode::Char('w') => pdf_state.fit_width(document),
+                        KeyCode::Char('i') => pdf_state.toggle_invert(source),
+                        KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(source),
+                        KeyCode::Char('-') => pdf_state.zoom_out(source),
+                        KeyCode::Char('w') => pdf_state.fit_width(source),
                         KeyCode::Home => pdf_state.first_page(),
                         KeyCode::End => pdf_state.last_page(),
                         _ => {}
@@ -1412,26 +1471,26 @@ fn run_app(
             // Idle: check for file changes (~1s interval) and pre-render
             if last_mtime_check.elapsed() >= Duration::from_secs(1) {
                 last_mtime_check = Instant::now();
-                if let Ok(meta) = fs::metadata(document.path()) {
-                    if let Ok(mtime) = meta.modified() {
-                        if last_mtime.map_or(true, |prev| mtime != prev) {
-                            last_mtime = Some(mtime);
-                            if document.reload().is_ok() {
-                                let saved_scroll = pdf_state.global_scroll;
-                                pdf_state.on_reload(document);
-                                let _ = pdf_state.initial_render(document);
-                                pdf_state.global_scroll = saved_scroll;
-                                // Clear search and link state
-                                search_state.clear();
-                                link_state.deactivate();
-                                link_state.page = usize::MAX;
-                                // Rebuild TOC
-                                let outlines = document.outlines().unwrap_or_default();
-                                *toc_state = TocState::new(&outlines);
-                                status_message = Some((
-                                    "File reloaded".to_string(),
-                                    Instant::now(),
-                                ));
+                if source.is_pdf() {
+                    if let Ok(meta) = fs::metadata(std::path::Path::new(source.path_or_url())) {
+                        if let Ok(mtime) = meta.modified() {
+                            if last_mtime.map_or(true, |prev| mtime != prev) {
+                                last_mtime = Some(mtime);
+                                if source.reload().is_ok() {
+                                    let saved_scroll = pdf_state.global_scroll;
+                                    pdf_state.on_reload(source);
+                                    let _ = pdf_state.initial_render(source);
+                                    pdf_state.global_scroll = saved_scroll;
+                                    search_state.clear();
+                                    link_state.deactivate();
+                                    link_state.page = usize::MAX;
+                                    let outlines = source.outlines();
+                                    *toc_state = TocState::new(&outlines);
+                                    status_message = Some((
+                                        "File reloaded".to_string(),
+                                        Instant::now(),
+                                    ));
+                                }
                             }
                         }
                     }
@@ -1439,7 +1498,7 @@ fn run_app(
             }
 
             if !pdf_state.prerender_done() {
-                while pdf_state.prerender_tick(document) {
+                while pdf_state.prerender_tick(source) {
                     if event::poll(Duration::from_millis(0))? {
                         break;
                     }

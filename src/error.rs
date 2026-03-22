@@ -13,6 +13,9 @@ pub enum TuiPdfError {
 
     #[error("Page {0} out of range (document has {1} pages)")]
     PageOutOfRange(usize, usize),
+
+    #[error("{0}")]
+    Other(String),
 }
 
 pub type Result<T> = std::result::Result<T, TuiPdfError>;

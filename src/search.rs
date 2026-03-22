@@ -1,4 +1,4 @@
-use crate::document::Document;
+use crate::content::ContentSource;
 use crate::error::Result;
 
 /// Pages to search per frame tick to keep the UI responsive.
@@ -70,7 +70,7 @@ impl SearchState {
     }
 
     /// Search a batch of pages. Returns true if new hits were found this tick.
-    pub fn search_tick(&mut self, document: &Document) -> Result<bool> {
+    pub fn search_tick(&mut self, source: &ContentSource) -> Result<bool> {
         if !self.searching {
             return Ok(false);
         }
@@ -80,7 +80,7 @@ impl SearchState {
 
         for i in self.pages_done..end {
             let page_idx = self.search_order[i];
-            let quads = document.search_page(page_idx, &self.query, 100)?;
+            let quads = source.search_page(page_idx, &self.query, 100);
             for quad in quads {
                 let x0 = quad.ul.x.min(quad.ll.x);
                 let y0 = quad.ul.y.min(quad.ur.y);

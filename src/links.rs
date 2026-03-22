@@ -1,4 +1,4 @@
-use crate::document::Document;
+use crate::content::ContentSource;
 use crate::error::Result;
 
 const DEFAULT_DPI: f32 = 192.0;
@@ -24,10 +24,10 @@ pub struct ScrollPosition {
 }
 
 /// Extract internal links from a page.
-pub fn extract_links(document: &Document, page_index: usize) -> Result<Vec<PageLink>> {
-    let links = document.page_links(page_index)?;
+pub fn extract_links(source: &ContentSource, page_index: usize) -> Result<Vec<PageLink>> {
+    let links = source.page_links(page_index);
     let mut result = Vec::new();
-    let page_count = document.page_count();
+    let page_count = source.page_count();
 
     for (i, link) in links.iter().enumerate() {
         let target = match &link.dest {
@@ -92,18 +92,18 @@ impl LinkState {
     }
 
     /// Load links for a page if not already loaded.
-    pub fn load_for_page(&mut self, document: &Document, page: usize) -> Result<()> {
+    pub fn load_for_page(&mut self, source: &ContentSource, page: usize) -> Result<()> {
         if self.page == page {
             return Ok(());
         }
-        self.links = extract_links(document, page)?;
+        self.links = extract_links(source, page)?;
         self.selected = 0;
         self.page = page;
         Ok(())
     }
 
-    pub fn activate(&mut self, document: &Document, page: usize) -> Result<()> {
-        self.load_for_page(document, page)?;
+    pub fn activate(&mut self, source: &ContentSource, page: usize) -> Result<()> {
+        self.load_for_page(source, page)?;
         if !self.links.is_empty() {
             self.active = true;
             self.selected = 0;

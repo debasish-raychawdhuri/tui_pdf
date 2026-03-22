@@ -80,6 +80,24 @@ pub fn decode_png(data: &[u8]) -> DynamicImage {
         .expect("cached PNG should be valid")
 }
 
+/// Scale an already-rendered image by zoom (relative to DEFAULT_DPI baseline).
+/// At zoom=1.0 the image is returned as-is; other values resize proportionally.
+pub fn render_image_dpi(img: &DynamicImage, zoom: f32) -> DynamicImage {
+    if (zoom - 1.0).abs() < 0.001 {
+        return img.clone();
+    }
+    let new_w = (img.width() as f32 * zoom) as u32;
+    let new_h = (img.height() as f32 * zoom) as u32;
+    img.resize_exact(new_w.max(1), new_h.max(1), image::imageops::FilterType::Lanczos3)
+}
+
+/// Compute stripe count from an image's pixel dimensions (for web content).
+pub fn compute_stripe_count_from_image(img: &DynamicImage, zoom: f32, font_height: u32) -> usize {
+    let pixel_height = (img.height() as f32 * zoom) as u32;
+    let count = (pixel_height + font_height - 1) / font_height;
+    count as usize
+}
+
 fn pixmap_to_image(page: &mupdf::Page, matrix: &Matrix) -> Result<DynamicImage> {
     // alpha=0.0 renders onto an opaque white background (RGB, 3 bytes/pixel)
     let pixmap = page.to_pixmap(matrix, &mupdf::Colorspace::device_rgb(), false, true)?;

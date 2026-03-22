@@ -9,11 +9,11 @@ use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{Image, Resize};
 
-use crate::document::Document;
+use crate::content::ContentSource;
 use crate::error::Result;
 use crate::links::LinkState;
 use crate::renderer::{
-    compute_stripe_count, decode_png, encode_png, overlay_highlights, render_page_dpi,
+    decode_png, encode_png, overlay_highlights,
     split_into_stripes, HighlightRect, StripeCache,
 };
 use crate::search::SearchState;
@@ -224,26 +224,26 @@ impl PdfViewState {
         self.global_scroll = self.global_scroll.saturating_sub(rows);
     }
 
-    pub fn zoom_in(&mut self, document: &Document) {
+    pub fn zoom_in(&mut self, source: &ContentSource) {
         self.zoom = (self.zoom + 0.25).min(5.0);
-        self.on_zoom_change(document);
+        self.on_zoom_change(source);
     }
 
-    pub fn zoom_out(&mut self, document: &Document) {
+    pub fn zoom_out(&mut self, source: &ContentSource) {
         self.zoom = (self.zoom - 0.25).max(0.25);
-        self.on_zoom_change(document);
+        self.on_zoom_change(source);
     }
 
-    pub fn fit_width(&mut self, document: &Document) {
+    pub fn fit_width(&mut self, source: &ContentSource) {
         let (_, _, aw, _) = self.last_render_area.unwrap_or((0, 0, 80, 24));
         let font_width = self.picker.font_size().0 as f32;
         let terminal_px = aw as f32 * font_width;
         let page = self.current_page();
-        if let Ok((page_w, _)) = document.page_size(page) {
+        if let Ok((page_w, _)) = source.page_size(page) {
             let dpi_scale = crate::renderer::DEFAULT_DPI / 72.0;
             let new_zoom = terminal_px / (page_w * dpi_scale);
             self.zoom = new_zoom.clamp(0.25, 5.0);
-            self.on_zoom_change(document);
+            self.on_zoom_change(source);
         }
     }
 
@@ -256,24 +256,24 @@ impl PdfViewState {
         self.inverted
     }
 
-    pub fn toggle_invert(&mut self, document: &Document) {
+    pub fn toggle_invert(&mut self, source: &ContentSource) {
         self.inverted = !self.inverted;
         self.last_link_overlay = None;
         self.last_search_overlay = None;
         self.rendered_pages.clear();
         self.dirty_highlight_stripes.clear();
-        let _ = self.initial_render(document);
+        let _ = self.initial_render(source);
     }
 
-    fn on_zoom_change(&mut self, document: &Document) {
-        let _ = self.recompute_geometry(document);
+    fn on_zoom_change(&mut self, source: &ContentSource) {
+        let _ = self.recompute_geometry(source);
         self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
         self.last_link_overlay = None;
         self.last_search_overlay = None;
         self.rendered_pages.clear();
         self.dirty_highlight_stripes.clear();
         // Re-render visible pages immediately at new zoom
-        let _ = self.initial_render(document);
+        let _ = self.initial_render(source);
     }
 
     pub fn page_count(&self) -> usize {
@@ -281,9 +281,9 @@ impl PdfViewState {
     }
 
     /// Reset state after the document has been reloaded (e.g. file changed on disk).
-    pub fn on_reload(&mut self, document: &Document) {
-        self.page_count = document.page_count();
-        let _ = self.recompute_geometry(document);
+    pub fn on_reload(&mut self, source: &ContentSource) {
+        self.page_count = source.page_count();
+        let _ = self.recompute_geometry(source);
         self.rendered_pages.clear();
         self.cache = StripeCache::new();
         self.dirty_highlight_stripes.clear();
@@ -355,7 +355,7 @@ impl PdfViewState {
         Some((page_idx, pdf_x, pdf_y))
     }
 
-    fn recompute_geometry(&mut self, document: &Document) -> Result<()> {
+    fn recompute_geometry(&mut self, source: &ContentSource) -> Result<()> {
         let font_height = self.picker.font_size().1 as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         self.page_stripe_counts.clear();
@@ -367,9 +367,9 @@ impl PdfViewState {
                 cumulative += PAGE_GAP;
             }
             self.cumulative_stripes.push(cumulative);
-            let count = compute_stripe_count(document, i, self.zoom, font_height)?;
+            let count = source.compute_stripe_count(i, self.zoom, font_height)?;
             self.page_stripe_counts.push(count);
-            let (w, _) = document.page_size(i)?;
+            let (w, _) = source.page_size(i)?;
             self.page_pixel_widths.push((w * scale) as u32);
             cumulative += count;
         }
@@ -445,7 +445,7 @@ impl PdfViewState {
     /// Render one page from the pre-render queue into stripe PNG cache.
     /// Does NOT build protocols — those are built on-demand in update_image.
     /// Returns true if there is more work to do.
-    pub fn prerender_tick(&mut self, document: &Document) -> bool {
+    pub fn prerender_tick(&mut self, source: &ContentSource) -> bool {
         let cache_key = self.cache_key();
         let font_height = self.picker.font_size().1 as u32;
         if font_height == 0 || self.prerender_pos >= self.prerender_queue.len() {
@@ -457,7 +457,7 @@ impl PdfViewState {
 
         // Build stripe PNGs if not cached
         if self.cache.get(page_idx, cache_key).is_none() {
-            if let Ok(mut img) = render_page_dpi(document, page_idx, self.zoom) {
+            if let Ok(mut img) = source.render_page_dpi(page_idx, self.zoom) {
                 if self.inverted {
                     img.invert();
                 }
@@ -483,11 +483,11 @@ impl PdfViewState {
     }
 
     /// Initial setup: render the first visible pages immediately, then queue the rest.
-    pub fn initial_render(&mut self, document: &Document) -> Result<()> {
+    pub fn initial_render(&mut self, source: &ContentSource) -> Result<()> {
         let cache_key = self.cache_key();
 
         if self.last_key != cache_key {
-            self.recompute_geometry(document)?;
+            self.recompute_geometry(source)?;
             self.last_key = cache_key;
             self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
         }
@@ -498,7 +498,7 @@ impl PdfViewState {
         // Render current page and next page immediately (PNGs + protocols)
         for page_idx in current..(current + 2).min(self.page_count) {
             if self.cache.get(page_idx, cache_key).is_none() {
-                let mut img = render_page_dpi(document, page_idx, self.zoom)?;
+                let mut img = source.render_page_dpi(page_idx, self.zoom)?;
                 if self.inverted {
                     img.invert();
                 }
@@ -525,7 +525,7 @@ impl PdfViewState {
 
     /// Ensure the current visible pages are rendered and cached.
     /// Call before draw to avoid blank pages when scrolling to uncached regions.
-    pub fn ensure_visible_rendered(&mut self, document: &Document) {
+    pub fn ensure_visible_rendered(&mut self, source: &ContentSource) {
         let cache_key = self.cache_key();
         let font_height = self.picker.font_size().1 as u32;
         if font_height == 0 {
@@ -535,7 +535,7 @@ impl PdfViewState {
         let mut refocus = false;
         for page_idx in current..(current + 2).min(self.page_count) {
             if self.cache.get(page_idx, cache_key).is_none() {
-                if let Ok(mut img) = render_page_dpi(document, page_idx, self.zoom) {
+                if let Ok(mut img) = source.render_page_dpi(page_idx, self.zoom) {
                     if self.inverted {
                         img.invert();
                     }

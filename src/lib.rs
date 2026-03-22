@@ -1,4 +1,5 @@
 pub mod config;
+pub mod content;
 pub mod document;
 pub mod error;
 pub mod links;
@@ -6,10 +7,12 @@ pub mod renderer;
 pub mod search;
 pub mod synctex;
 pub mod toc;
+pub mod web;
 pub mod widget;
 pub mod zotero;
 
 pub use config::{load_config, save_config, load_session, save_session, list_sessions, move_sessions_dir, Config, Session, SessionDoc};
+pub use content::ContentSource;
 pub use document::Document;
 pub use error::{Result, TuiPdfError};
 pub use links::LinkState;
@@ -17,5 +20,6 @@ pub use renderer::{compute_stripe_count, render_page, render_page_dpi, split_int
 pub use search::SearchState;
 pub use synctex::{jump_to_neovim, send_forward, socket_path, synctex_edit, synctex_view, SyncTexResult, SyncTexForward};
 pub use toc::{TocState, TocWidget};
+pub use web::{WebContent, capture_url};
 pub use widget::{PdfViewState, PdfWidget, StatusBar};
 pub use zotero::{latest_pdf, load_library, lookup_by_path, ZoteroEntry, ZoteroLibrary};
