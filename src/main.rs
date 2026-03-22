@@ -160,7 +160,8 @@ enum AppAction {
     SwitchDoc(usize),
     CloseDoc,
     OpenLatest,
-    OpenUrl(String),
+    /// Temporary URL preview (from metadata view) — not added to open docs
+    PreviewUrl(String),
 }
 
 struct ProbeCell {
@@ -740,8 +741,51 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     }
                 }
             }
-            Ok(AppAction::OpenUrl(url)) => {
-                current_path = url;
+            Ok(AppAction::PreviewUrl(url)) => {
+                // Temporary preview: capture and display the URL, then return to current doc
+                let _ = terminal.draw(|frame| {
+                    let area = frame.area();
+                    let msg = format!("Loading {}...", &url);
+                    Paragraph::new(Span::styled(msg, Style::default().fg(Color::Yellow)))
+                        .render(area, frame.buffer_mut());
+                });
+                match capture_url(&url) {
+                    Ok(web) => {
+                        let mut preview_source = ContentSource::Web(web);
+                        let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+                        picker.set_background_color([0, 0, 0, 255]);
+                        let mut pdf_state = PdfViewState::new(preview_source.page_count(), picker);
+                        if inverted { pdf_state.toggle_invert(&preview_source); }
+                        let _ = pdf_state.initial_render(&preview_source);
+                        let outlines = preview_source.outlines();
+                        let mut toc_state = TocState::new(&outlines);
+                        let mut link_state = LinkState::new();
+                        let mut search_state = SearchState::new();
+                        let mut goto_input: Option<String> = None;
+                        let mut search_input: Option<String> = None;
+                        let _ = run_app(
+                            &mut terminal,
+                            &mut preview_source,
+                            &mut pdf_state,
+                            &mut toc_state,
+                            &mut link_state,
+                            &mut search_state,
+                            &mut goto_input,
+                            &mut search_input,
+                            None,
+                            &open_docs,
+                            current_idx,
+                            &session_name,
+                            &zotero_dir,
+                        );
+                        // After quitting the preview, return to the current document
+                        inverted = pdf_state.inverted();
+                    }
+                    Err(_) => {
+                        // Silently return to current doc
+                    }
+                }
+                // current_path unchanged — will reopen the original doc
             }
             Err(e) => {
                 let _ = stdout().execute(DisableMouseCapture);
@@ -1103,7 +1147,7 @@ fn run_app(
                                         .map(|(_, v)| format!("https://doi.org/{}", v))
                                 });
                             if let Some(url) = url {
-                                return Ok(AppAction::OpenUrl(url));
+                                return Ok(AppAction::PreviewUrl(url));
                             } else {
                                 status_message = Some(("No URL or DOI available".to_string(), Instant::now()));
                             }

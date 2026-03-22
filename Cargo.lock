@@ -3102,6 +3102,7 @@ checksum = "f17aaa1c6e3dc22b1da4b6bba97d066e354c7945cac2f7852d4e4e7ca7a6b56d"
 name = "tui_pdf"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "crossterm",
  "headless_chrome",
  "image",
@@ -3110,6 +3111,7 @@ dependencies = [
  "ratatui-image",
  "rusqlite",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
  "toml",
 ]
