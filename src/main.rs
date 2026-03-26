@@ -504,6 +504,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
     let mut inverted = false;
     let zotero_dir: Option<String> = load_config().zotero_dir;
     let session_name = session_name;
+    let mut saved_session_name: Option<String> = None;
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -682,6 +683,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             current_idx,
             &session_name,
             &zotero_dir,
+            &mut saved_session_name,
         );
 
         if let Some(ref s) = sock {
@@ -777,6 +779,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                             current_idx,
                             &session_name,
                             &zotero_dir,
+                            &mut saved_session_name,
                         );
                         // After quitting the preview, return to the current document
                         inverted = pdf_state.inverted();
@@ -816,6 +819,7 @@ fn run_app(
     current_idx: usize,
     session_name: &Option<String>,
     zotero_dir: &Option<String>,
+    saved_session_name: &mut Option<String>,
 ) -> io::Result<AppAction> {
     // Auto-reload state (PDF only)
     let mut last_mtime: Option<SystemTime> = if source.is_pdf() {
@@ -839,7 +843,6 @@ fn run_app(
 
     // Session name input
     let mut session_input: Option<String> = None;
-    let mut saved_session_name: Option<String> = None;
 
     // Metadata view
     let mut metadata_view: Option<Vec<(String, String)>> = None;
@@ -1194,7 +1197,7 @@ fn run_app(
                                                 format!("Session '{}' saved", name),
                                                 Instant::now(),
                                             ));
-                                            saved_session_name = Some(name);
+                                            *saved_session_name = Some(name);
                                         }
                                         Err(e) => {
                                             status_message = Some((
