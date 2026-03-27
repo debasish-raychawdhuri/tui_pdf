@@ -154,6 +154,29 @@ fn copy_to_clipboard(text: &str) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::NotFound, "no clipboard tool found"))
 }
 
+fn send_to_remarkable(path: &str) -> io::Result<String> {
+    use std::process::Command;
+    if !std::path::Path::new(path).exists() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+    }
+    let output = Command::new("curl")
+        .args(["-sS", "-f", "--connect-timeout", "3",
+               "http://10.11.99.1/upload", "-F", &format!("file=@\"{}\"", path)])
+        .output()?;
+    if output.status.success() {
+        let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        Ok(body)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            format!("curl failed (exit code {})", output.status.code().unwrap_or(-1))
+        } else {
+            stderr.trim().to_string()
+        };
+        Err(io::Error::new(io::ErrorKind::Other, msg))
+    }
+}
+
 enum AppAction {
     Quit,
     OpenZotero,
@@ -1391,6 +1414,29 @@ fn run_app(
                                 }
                             } else {
                                 session_input = Some(String::new());
+                            }
+                        }
+                        KeyCode::Char('R') => {
+                            if !is_url(&source.path_or_url()) {
+                                let path = source.path_or_url().to_string();
+                                match send_to_remarkable(&path) {
+                                    Ok(_) => {
+                                        let name = std::path::Path::new(&path)
+                                            .file_name()
+                                            .map(|f| f.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        status_message = Some((
+                                            format!("Sent '{}' to reMarkable", name),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        status_message = Some((
+                                            format!("reMarkable: {} (USB connected?)", e),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
                             }
                         }
                         KeyCode::Tab => {
