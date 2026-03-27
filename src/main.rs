@@ -159,8 +159,10 @@ fn send_to_remarkable_cloud(path: &str) -> io::Result<String> {
     if !std::path::Path::new(path).exists() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "file not found"));
     }
+    // Ensure /tui-pdf directory exists (ignore error if it already exists)
+    let _ = Command::new("rmapi").args(["mkdir", "/tui-pdf"]).output();
     let output = Command::new("rmapi")
-        .args(["put", path])
+        .args(["put", path, "/tui-pdf/"])
         .output()
         .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("rmapi not found: {}", e)))?;
     if output.status.success() {
@@ -176,14 +178,60 @@ fn send_to_remarkable_cloud(path: &str) -> io::Result<String> {
     }
 }
 
+/// Find the "tui-pdf" folder UUID on reMarkable via the USB web interface.
+/// If not found, create it via rmapi and re-check.
+fn remarkable_usb_folder_id() -> io::Result<String> {
+    use std::process::Command;
+    let find_folder = || -> Option<String> {
+        let list = Command::new("curl")
+            .args(["-sS", "-f", "--connect-timeout", "3", "http://10.11.99.1/documents/"])
+            .output().ok()?;
+        if !list.status.success() { return None; }
+        let body = String::from_utf8_lossy(&list.stdout);
+        let docs: Vec<serde_json::Value> = serde_json::from_str(&body).ok()?;
+        for doc in &docs {
+            if doc.get("Type").and_then(|t| t.as_str()) == Some("CollectionType")
+                && doc.get("VissibleName").and_then(|n| n.as_str()) == Some("tui-pdf")
+            {
+                return doc.get("ID").and_then(|i| i.as_str()).map(|s| s.to_string());
+            }
+        }
+        None
+    };
+    if let Some(id) = find_folder() {
+        return Ok(id);
+    }
+    // Folder not on device yet — create via rmapi (cloud) and wait for sync
+    let mkdir = Command::new("rmapi").args(["mkdir", "/tui-pdf"]).output();
+    if mkdir.is_err() || !mkdir.unwrap().status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other,
+            "tui-pdf folder not found; rmapi mkdir failed — create it on the device manually"));
+    }
+    // Give the device a moment to sync, then re-check
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    find_folder().ok_or_else(|| io::Error::new(io::ErrorKind::Other,
+        "created tui-pdf via cloud but device hasn't synced yet — try again shortly"))
+}
+
 fn send_to_remarkable(path: &str) -> io::Result<String> {
     use std::process::Command;
     if !std::path::Path::new(path).exists() {
         return Err(io::Error::new(io::ErrorKind::NotFound, "file not found"));
     }
+    let folder_id = remarkable_usb_folder_id()?;
+    // Navigate into the folder first — the device tracks "current directory"
+    // server-side, and the next upload lands in whatever was last fetched.
+    let nav = Command::new("curl")
+        .args(["-sS", "-f", "--connect-timeout", "3",
+               &format!("http://10.11.99.1/documents/{}", folder_id)])
+        .output()?;
+    if !nav.status.success() {
+        return Err(io::Error::new(io::ErrorKind::Other, "failed to navigate to tui-pdf folder"));
+    }
     let output = Command::new("curl")
         .args(["-sS", "-f", "--connect-timeout", "3",
-               "http://10.11.99.1/upload", "-F", &format!("file=@\"{}\"", path)])
+               "http://10.11.99.1/upload",
+               "-F", &format!("file=@\"{}\"", path)])
         .output()?;
     if output.status.success() {
         let body = String::from_utf8_lossy(&output.stdout).trim().to_string();
