@@ -25,6 +25,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
 - **Portable sessions** — Zotero PDF paths are stored as portable `zotero://` URIs, so sessions synced via cloud storage work across computers
+- **reMarkable integration** — send the current PDF to a reMarkable tablet via USB (`R`) or to the reMarkable cloud via [rmapi](https://github.com/ddvk/rmapi) (`C`)
 - **Shell completions** — tab completion for bash, fish, and zsh
 
 ## Requirements
@@ -153,6 +154,8 @@ tui-pdf --completions zsh
 | `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
 | `d` | Document picker |
 | `Tab` / `Shift+Tab` | Cycle between open documents |
+| `R` | Send PDF to reMarkable via USB |
+| `C` | Send PDF to reMarkable cloud (via rmapi) |
 | `S` | Save session (prompts for name, or saves to current session) |
 | `x` | Close current document |
 | `q` / `Esc` | Quit |
