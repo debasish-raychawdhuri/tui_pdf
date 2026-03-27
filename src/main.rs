@@ -978,7 +978,7 @@ fn run_app(
                     TocWidget.render(cols[0], frame.buffer_mut(), toc_state);
 
                     if synctex_probe.is_none() {
-                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt, cols[1].width) {
                             let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                             frame.render_widget(msg, cols[1]);
                         } else {
@@ -989,7 +989,7 @@ fn run_app(
                     }
                 } else {
                     if synctex_probe.is_none() {
-                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt) {
+                        if let Err(e) = pdf_state.update_image(Some(link_state), search_opt, main_area.width) {
                             let msg = ratatui::widgets::Paragraph::new(format!("Render error: {e}"));
                             frame.render_widget(msg, main_area);
                         } else {

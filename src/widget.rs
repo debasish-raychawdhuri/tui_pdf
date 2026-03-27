@@ -137,6 +137,9 @@ pub struct PdfViewState {
 
     /// Stripes modified by probe markers: (page, stripe_index)
     probe_dirty_stripes: Vec<(usize, usize)>,
+
+    /// Terminal area width in columns (for centering oversized pages)
+    render_cols: u16,
 }
 
 impl PdfViewState {
@@ -161,6 +164,7 @@ impl PdfViewState {
             inverted: false,
             last_render_area: None,
             probe_dirty_stripes: Vec::new(),
+            render_cols: 0,
         }
     }
 
@@ -419,8 +423,16 @@ impl PdfViewState {
     }
 
     /// Build a pre-encoded Protocol from a DynamicImage stripe.
+    /// If the stripe is wider than the terminal, crop it to center horizontally.
     fn build_protocol(&self, img: image::DynamicImage) -> Option<Protocol> {
         let font_size = self.picker.font_size();
+        let area_pixel_width = self.render_cols as u32 * font_size.0 as u32;
+        let img = if area_pixel_width > 0 && img.width() > area_pixel_width {
+            let crop_left = (img.width() - area_pixel_width) / 2;
+            img.crop_imm(crop_left, 0, area_pixel_width, img.height())
+        } else {
+            img
+        };
         let w = (img.width() as f32 / font_size.0 as f32).ceil() as u16;
         let h = (img.height() as f32 / font_size.1 as f32).ceil() as u16;
         let size = Rect::new(0, 0, w, h);
@@ -557,7 +569,13 @@ impl PdfViewState {
         &mut self,
         link_state: Option<&LinkState>,
         search_state: Option<&SearchState>,
+        area_cols: u16,
     ) -> Result<()> {
+        // Invalidate protocols if terminal width changed (affects centering crop)
+        if area_cols != self.render_cols {
+            self.render_cols = area_cols;
+            self.rendered_pages.clear();
+        }
         let cache_key = self.cache_key();
 
         // Determine current link overlay state
