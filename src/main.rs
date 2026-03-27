@@ -154,6 +154,28 @@ fn copy_to_clipboard(text: &str) -> io::Result<()> {
     Err(io::Error::new(io::ErrorKind::NotFound, "no clipboard tool found"))
 }
 
+fn send_to_remarkable_cloud(path: &str) -> io::Result<String> {
+    use std::process::Command;
+    if !std::path::Path::new(path).exists() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+    }
+    let output = Command::new("rmapi")
+        .args(["put", path])
+        .output()
+        .map_err(|e| io::Error::new(io::ErrorKind::NotFound, format!("rmapi not found: {}", e)))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let msg = if stderr.trim().is_empty() {
+            format!("rmapi failed (exit code {})", output.status.code().unwrap_or(-1))
+        } else {
+            stderr.trim().to_string()
+        };
+        Err(io::Error::new(io::ErrorKind::Other, msg))
+    }
+}
+
 fn send_to_remarkable(path: &str) -> io::Result<String> {
     use std::process::Command;
     if !std::path::Path::new(path).exists() {
@@ -280,6 +302,8 @@ KEYBINDINGS:
     s                           SyncTeX probe (keyboard reverse search)
     o                           Open Zotero browser
     O                           Open latest Zotero PDF
+    R                           Send PDF to reMarkable via USB
+    C                           Send PDF to reMarkable cloud (rmapi)
     S                           Save session (prompts for name first time)
     d                           Document picker
     Tab/Shift+Tab               Cycle between open documents
@@ -1433,6 +1457,29 @@ fn run_app(
                                     Err(e) => {
                                         status_message = Some((
                                             format!("reMarkable: {} (USB connected?)", e),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        KeyCode::Char('C') => {
+                            if !is_url(&source.path_or_url()) {
+                                let path = source.path_or_url().to_string();
+                                match send_to_remarkable_cloud(&path) {
+                                    Ok(_) => {
+                                        let name = std::path::Path::new(&path)
+                                            .file_name()
+                                            .map(|f| f.to_string_lossy().to_string())
+                                            .unwrap_or_default();
+                                        status_message = Some((
+                                            format!("Sent '{}' to reMarkable cloud", name),
+                                            Instant::now(),
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        status_message = Some((
+                                            format!("reMarkable cloud: {}", e),
                                             Instant::now(),
                                         ));
                                     }
