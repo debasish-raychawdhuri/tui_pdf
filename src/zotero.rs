@@ -16,6 +16,7 @@ pub struct ZoteroEntry {
     pub pages: String,
     pub item_type: String,
     pub url: String,
+    pub publisher: String,
     pub archive: String,
     pub archive_id: String,
     pub pdf_path: PathBuf,
@@ -74,6 +75,14 @@ impl ZoteroEntry {
             "inproceedings" | "incollection" => {
                 if !self.publication.is_empty() {
                     lines.push(format!("  booktitle = {{{}}},", self.publication));
+                }
+                if !self.publisher.is_empty() {
+                    lines.push(format!("  publisher = {{{}}},", self.publisher));
+                }
+            }
+            "book" => {
+                if !self.publisher.is_empty() {
+                    lines.push(format!("  publisher = {{{}}},", self.publisher));
                 }
             }
             _ => {
@@ -366,6 +375,7 @@ pub fn load_library(zotero_dir: &Path) -> Result<ZoteroLibrary, Box<dyn std::err
             pages: get_field("pages"),
             item_type,
             url,
+            publisher: get_field("publisher"),
             archive,
             archive_id,
             pdf_path,
@@ -509,6 +519,7 @@ pub fn lookup_by_path(zotero_dir: &Path, pdf_path: &Path) -> Option<ZoteroEntry>
         pages: get_field("pages"),
         item_type,
         url: get_field("url"),
+        publisher: get_field("publisher"),
         archive,
         archive_id: get_field("archiveID"),
         pdf_path: pdf_path.to_path_buf(),
