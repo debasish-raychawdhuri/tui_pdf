@@ -3104,6 +3104,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "crossterm",
+ "flate2",
  "headless_chrome",
  "image",
  "mupdf",

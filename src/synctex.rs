@@ -105,6 +105,118 @@ pub fn synctex_view(
     }
 }
 
+/// A synctex position record: file, line, page (0-indexed), x, y in PDF points.
+pub struct SyncTexPosition {
+    pub file: String,
+    pub line: usize,
+    pub page: usize,
+    pub x: f32,
+    pub y: f32,
+}
+
+/// Parse the synctex.gz (or .synctex) file for a PDF and return all unique
+/// (file, line) positions with their page and coordinates.
+/// Filters to user source files (skips system .sty/.cls etc under /usr/).
+/// Coordinates are converted from scaled points to PDF points (÷65536).
+pub fn synctex_positions(pdf_path: &Path) -> Vec<SyncTexPosition> {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::Read as _;
+
+    // Find the synctex file: try .synctex.gz then .synctex
+    let stem = pdf_path.with_extension("");
+    let gz_path = stem.with_extension("synctex.gz");
+    let plain_path = stem.with_extension("synctex");
+
+    let data = if gz_path.exists() {
+        let file = match File::open(&gz_path) { Ok(f) => f, Err(_) => return Vec::new() };
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut s = String::new();
+        if decoder.read_to_string(&mut s).is_err() { return Vec::new(); }
+        s
+    } else if plain_path.exists() {
+        match std::fs::read_to_string(&plain_path) { Ok(s) => s, Err(_) => return Vec::new() }
+    } else {
+        return Vec::new();
+    };
+
+    // Parse Input tags
+    let mut inputs: HashMap<u32, String> = HashMap::new();
+    let pdf_dir = pdf_path.parent().unwrap_or(Path::new("."));
+
+    for line in data.lines() {
+        if let Some(rest) = line.strip_prefix("Input:") {
+            // Format: tag:filepath
+            if let Some((tag_str, filepath)) = rest.split_once(':') {
+                if let Ok(tag) = tag_str.parse::<u32>() {
+                    // Skip system files
+                    if !filepath.starts_with("/usr/") {
+                        // Resolve relative paths against PDF directory
+                        let resolved = if filepath.starts_with("./") || !filepath.starts_with('/') {
+                            pdf_dir.join(filepath).to_string_lossy().to_string()
+                        } else {
+                            filepath.to_string()
+                        };
+                        inputs.insert(tag, resolved);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut results = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut current_page: usize = 0;
+
+    for line in data.lines() {
+        // Track current page: {N starts page, }N ends page
+        if line.starts_with('{') {
+            if let Ok(p) = line[1..].parse::<usize>() {
+                current_page = p;
+            }
+            continue;
+        }
+
+        // Parse position records: ( [ h v k g all have format tag,line:x,y:...
+        let record_char = line.as_bytes().first().copied().unwrap_or(0);
+        if !matches!(record_char, b'(' | b'[' | b'h' | b'v' | b'k' | b'g') {
+            continue;
+        }
+
+        let rest = &line[1..];
+        // Format: tag,line:x,y:...
+        let Some((tag_line, coords)) = rest.split_once(':') else { continue };
+        let Some((tag_str, line_str)) = tag_line.split_once(',') else { continue };
+        let Ok(tag) = tag_str.parse::<u32>() else { continue };
+        let Some(file) = inputs.get(&tag) else { continue };
+        let Ok(src_line) = line_str.parse::<usize>() else { continue };
+        if src_line == 0 { continue; }
+
+        // Parse x,y from coords (before next colon)
+        let coord_part = coords.split_once(':').map(|(c, _)| c).unwrap_or(coords);
+        let Some((x_str, y_str)) = coord_part.split_once(',') else { continue };
+        let Ok(x_sp) = x_str.parse::<f64>() else { continue };
+        let Ok(y_sp) = y_str.parse::<f64>() else { continue };
+
+        let key = (file.clone(), src_line);
+        if !seen.insert(key) { continue; }
+
+        // Convert scaled points to PDF points (1 PDF point = 65536 scaled points)
+        let x_pt = (x_sp / 65536.0) as f32;
+        let y_pt = (y_sp / 65536.0) as f32;
+
+        results.push(SyncTexPosition {
+            file: file.clone(),
+            line: src_line,
+            page: current_page.saturating_sub(1), // synctex pages are 1-based
+            x: x_pt,
+            y: y_pt,
+        });
+    }
+
+    results
+}
+
 /// Compute the socket path for a given PDF, based on its canonical path.
 pub fn socket_path(pdf_path: &Path) -> PathBuf {
     let canonical = pdf_path.canonicalize().unwrap_or_else(|_| pdf_path.to_path_buf());

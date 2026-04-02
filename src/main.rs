@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use tui_pdf::synctex_positions;
 use std::fs;
 use std::io::{self, stdout, BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
@@ -269,40 +269,27 @@ struct ProbeCell {
 fn compute_probe_grid(
     pdf_state: &PdfViewState,
     pdf_path: &Path,
-    area: ratatui::layout::Rect,
+    _area: ratatui::layout::Rect,
 ) -> Vec<ProbeCell> {
-    let cell_h: u16 = 5;
-    let cols: u16 = 4;
-    let cell_w = area.width / cols;
-    if cell_w == 0 || cell_h == 0 {
-        return Vec::new();
-    }
+    // Parse synctex file directly to get all source positions,
+    // then filter to those visible on screen.
+    let positions = synctex_positions(pdf_path);
 
-    let mut seen = HashSet::new();
     let mut cells = Vec::new();
     let mut number = 1;
-    let rows = area.height / cell_h;
 
-    for r in 0..rows {
-        for c in 0..cols {
-            let center_row = area.y + r * cell_h + cell_h / 2;
-            let center_col = area.x + c * cell_w + cell_w / 2;
-            if let Some((page, pdf_x, pdf_y)) = pdf_state.terminal_to_pdf(center_row, center_col) {
-                if let Some(result) = synctex_edit(pdf_path, page + 1, pdf_x, pdf_y) {
-                    let key = (result.file.clone(), result.line);
-                    if seen.insert(key) {
-                        cells.push(ProbeCell {
-                            number,
-                            page,
-                            pdf_x,
-                            pdf_y,
-                            file: result.file,
-                            line: result.line,
-                        });
-                        number += 1;
-                    }
-                }
-            }
+    for pos in &positions {
+        // Only include positions visible on screen
+        if pdf_state.pdf_to_terminal(pos.page, pos.x, pos.y).is_some() {
+            cells.push(ProbeCell {
+                number,
+                page: pos.page,
+                pdf_x: pos.x,
+                pdf_y: pos.y,
+                file: pos.file.clone(),
+                line: pos.line,
+            });
+            number += 1;
         }
     }
     cells

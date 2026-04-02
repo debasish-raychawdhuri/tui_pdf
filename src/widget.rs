@@ -359,6 +359,39 @@ impl PdfViewState {
         Some((page_idx, pdf_x, pdf_y))
     }
 
+    /// Convert PDF (page, x, y) coordinates to terminal (row, col).
+    /// Returns None if the position is not currently visible on screen.
+    pub fn pdf_to_terminal(&self, page: usize, pdf_x: f32, pdf_y: f32) -> Option<(u16, u16)> {
+        let (ax, ay, aw, ah) = self.last_render_area?;
+        if page >= self.cumulative_stripes.len() {
+            return None;
+        }
+
+        let font_height = self.picker.font_size().1 as f32;
+        let font_width = self.picker.font_size().0 as f32;
+        let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+
+        // PDF y → stripe within page
+        let stripe_in_page = (pdf_y * scale / font_height) as usize;
+        let page_base = self.cumulative_stripes[page];
+        let global_stripe = page_base + stripe_in_page;
+
+        // Check if visible
+        if global_stripe < self.global_scroll || global_stripe >= self.global_scroll + ah as usize {
+            return None;
+        }
+        let screen_row = (global_stripe - self.global_scroll) as u16;
+
+        // PDF x → column
+        let pw = self.page_pixel_widths.get(page).copied().unwrap_or(0) as u16;
+        let img_cols = if font_width > 0.0 { (pw + font_width as u16 - 1) / font_width as u16 } else { aw };
+        let x_offset = if img_cols < aw { (aw - img_cols) / 2 } else { 0 };
+        let col_in_page = (pdf_x * scale / font_width) as u16;
+        let term_col = ax + x_offset + col_in_page;
+
+        Some((ay + screen_row, term_col))
+    }
+
     fn recompute_geometry(&mut self, source: &ContentSource) -> Result<()> {
         let font_height = self.picker.font_size().1 as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
