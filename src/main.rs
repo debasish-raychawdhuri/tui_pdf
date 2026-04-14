@@ -31,6 +31,93 @@ fn is_url(s: &str) -> bool {
     s.starts_with("http://") || s.starts_with("https://")
 }
 
+/// If the given path is a .tex file, find the corresponding PDF.
+/// Strategy:
+/// 1. Same basename with .pdf extension in the same directory
+/// 2. Search .synctex.gz/.synctex files in the directory to find a PDF
+///    that references this .tex file as an input (handles multi-file projects)
+/// 3. Falls back to the original path if nothing is found
+fn resolve_tex_to_pdf(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if !ext.eq_ignore_ascii_case("tex") {
+        return path.to_string();
+    }
+
+    let dir = p.parent().unwrap_or(std::path::Path::new("."));
+    let canonical_tex = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+
+    // 1. Same basename, .pdf extension
+    let same_name_pdf = p.with_extension("pdf");
+    if same_name_pdf.exists() {
+        return same_name_pdf.to_string_lossy().to_string();
+    }
+
+    // 2. Scan synctex files in the directory to find which PDF includes this .tex
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let epath = entry.path();
+            let fname = epath.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let is_synctex_gz = fname.ends_with(".synctex.gz");
+            let is_synctex = !is_synctex_gz && fname.ends_with(".synctex");
+            if !is_synctex_gz && !is_synctex {
+                continue;
+            }
+
+            // Derive the PDF path from the synctex filename
+            let pdf_name = if is_synctex_gz {
+                fname.strip_suffix(".synctex.gz").unwrap().to_string() + ".pdf"
+            } else {
+                fname.strip_suffix(".synctex").unwrap().to_string() + ".pdf"
+            };
+            let pdf_path = dir.join(&pdf_name);
+            if !pdf_path.exists() {
+                continue;
+            }
+
+            // Check if this synctex file references our .tex file
+            if synctex_references_tex(&epath, &canonical_tex, dir) {
+                return pdf_path.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    path.to_string()
+}
+
+/// Check whether a synctex file references a given .tex file in its Input entries.
+fn synctex_references_tex(synctex_path: &std::path::Path, tex_path: &std::path::Path, pdf_dir: &std::path::Path) -> bool {
+    use std::io::Read as _;
+
+    let fname = synctex_path.file_name().unwrap_or_default().to_string_lossy();
+    let data = if fname.ends_with(".synctex.gz") {
+        let file = match std::fs::File::open(synctex_path) { Ok(f) => f, Err(_) => return false };
+        let mut decoder = flate2::read::GzDecoder::new(file);
+        let mut s = String::new();
+        if decoder.read_to_string(&mut s).is_err() { return false; }
+        s
+    } else {
+        match std::fs::read_to_string(synctex_path) { Ok(s) => s, Err(_) => return false }
+    };
+
+    for line in data.lines() {
+        if let Some(rest) = line.strip_prefix("Input:") {
+            if let Some((_tag_str, filepath)) = rest.split_once(':') {
+                let resolved = if filepath.starts_with("./") || !filepath.starts_with('/') {
+                    pdf_dir.join(filepath)
+                } else {
+                    std::path::PathBuf::from(filepath)
+                };
+                let canonical = resolved.canonicalize().unwrap_or(resolved);
+                if canonical == *tex_path {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn render_metadata_overlay(
     fields: &[(String, String)],
     area: ratatui::layout::Rect,
@@ -562,9 +649,10 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Collect all remaining args as PDF paths
-    let pdf_paths: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
-    open_viewer(&pdf_paths, None, None)
+    // Collect all remaining args as PDF paths, resolving .tex files to their PDFs
+    let pdf_paths: Vec<String> = args[1..].iter().map(|s| resolve_tex_to_pdf(s)).collect();
+    let pdf_refs: Vec<&str> = pdf_paths.iter().map(|s| s.as_str()).collect();
+    open_viewer(&pdf_refs, None, None)
 }
 
 fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option<&Session>) -> io::Result<()> {
