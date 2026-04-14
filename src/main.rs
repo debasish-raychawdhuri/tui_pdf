@@ -362,22 +362,36 @@ fn compute_probe_grid(
     // then filter to those visible on screen.
     let positions = synctex_positions(pdf_path);
 
+    // Collect visible positions with their terminal coordinates
+    let mut visible: Vec<(u16, u16, &tui_pdf::SyncTexPosition)> = Vec::new();
+    for pos in &positions {
+        if let Some((row, col)) = pdf_state.pdf_to_terminal(pos.page, pos.x, pos.y) {
+            visible.push((row, col, pos));
+        }
+    }
+
+    // Sort by visual reading order: top-to-bottom, then left-to-right,
+    // then by source line (smallest first) so dedup keeps the paragraph start
+    visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.line.cmp(&b.2.line)));
+
+    // Deduplicate by terminal cell — keep only one probe per screen position
+    let mut seen_cells = std::collections::HashSet::new();
     let mut cells = Vec::new();
     let mut number = 1;
 
-    for pos in &positions {
-        // Only include positions visible on screen
-        if pdf_state.pdf_to_terminal(pos.page, pos.x, pos.y).is_some() {
-            cells.push(ProbeCell {
-                number,
-                page: pos.page,
-                pdf_x: pos.x,
-                pdf_y: pos.y,
-                file: pos.file.clone(),
-                line: pos.line,
-            });
-            number += 1;
+    for (row, col, pos) in &visible {
+        if !seen_cells.insert((*row, *col)) {
+            continue;
         }
+        cells.push(ProbeCell {
+            number,
+            page: pos.page,
+            pdf_x: pos.x,
+            pdf_y: pos.y,
+            file: pos.file.clone(),
+            line: pos.line,
+        });
+        number += 1;
     }
     cells
 }
