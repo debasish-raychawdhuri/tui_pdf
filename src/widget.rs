@@ -135,8 +135,10 @@ pub struct PdfViewState {
     /// Last render area for terminal-to-PDF coordinate conversion.
     pub last_render_area: Option<(u16, u16, u16, u16)>,
 
-    /// Stripes modified by probe markers: (page, stripe_index)
-    probe_dirty_stripes: Vec<(usize, usize)>,
+    /// Original protocols swapped out by `apply_probe_markers`, to be restored
+    /// by `clear_probe_markers`. Saves re-transmission and keeps kitty image IDs
+    /// stable across probe entry/exit.
+    probe_swapped: Vec<(usize, usize, Protocol)>,
 
     /// Terminal area width in columns (for centering oversized pages)
     render_cols: u16,
@@ -163,7 +165,7 @@ impl PdfViewState {
             prerender_pos: 0,
             inverted: false,
             last_render_area: None,
-            probe_dirty_stripes: Vec::new(),
+            probe_swapped: Vec::new(),
             render_cols: 0,
         }
     }
@@ -825,13 +827,17 @@ impl PdfViewState {
 
     /// Draw numbered markers into the rendered stripe protocols.
     /// Each marker is (page_0indexed, pdf_x, pdf_y, number).
-    /// Call once when entering probe mode. Call `clear_probe_markers` to undo.
+    /// Swaps the original Protocol out for a badge-decorated one and saves the
+    /// original in `probe_swapped`. `clear_probe_markers` swaps them back so the
+    /// original's already-transmitted kitty image is re-placed instead of a fresh
+    /// one being re-transmitted.
     pub fn apply_probe_markers(&mut self, markers: &[(usize, f32, f32, usize)]) {
+        // If a previous probe's swaps are still in place, restore them first.
+        self.clear_probe_markers();
+
         let cache_key = self.cache_key();
         let font_height = self.picker.font_size().1 as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
-
-        self.probe_dirty_stripes.clear();
 
         // Group markers by page
         let mut by_page: HashMap<usize, Vec<(f32, f32, usize)>> = HashMap::new();
@@ -882,11 +888,14 @@ impl PdfViewState {
                     draw_number_badge(&mut rgba, x, y, num);
                 }
                 let modified = image::DynamicImage::ImageRgba8(rgba);
-                if let Some(proto) = self.build_protocol(modified) {
+                if let Some(badge_proto) = self.build_protocol(modified) {
                     if let Some(page_protos) = self.rendered_pages.get_mut(page_idx) {
                         if *stripe_idx < page_protos.len() {
-                            page_protos[*stripe_idx] = proto;
-                            self.probe_dirty_stripes.push((*page_idx, *stripe_idx));
+                            let original = std::mem::replace(
+                                &mut page_protos[*stripe_idx],
+                                badge_proto,
+                            );
+                            self.probe_swapped.push((*page_idx, *stripe_idx, original));
                         }
                     }
                 }
@@ -894,20 +903,13 @@ impl PdfViewState {
         }
     }
 
-    /// Restore stripes that were modified by probe markers back to clean cache versions.
+    /// Restore originals swapped out by `apply_probe_markers`.
     pub fn clear_probe_markers(&mut self) {
-        let cache_key = self.cache_key();
-        let dirty = std::mem::take(&mut self.probe_dirty_stripes);
-        for (page_idx, stripe_idx) in dirty {
-            if let Some(stripe_pngs) = self.cache.get(page_idx, cache_key) {
-                if let Some(png) = stripe_pngs.get(stripe_idx) {
-                    if let Some(proto) = self.build_protocol(decode_png(png)) {
-                        if let Some(page_protos) = self.rendered_pages.get_mut(&page_idx) {
-                            if stripe_idx < page_protos.len() {
-                                page_protos[stripe_idx] = proto;
-                            }
-                        }
-                    }
+        let swapped = std::mem::take(&mut self.probe_swapped);
+        for (page_idx, stripe_idx, original) in swapped {
+            if let Some(page_protos) = self.rendered_pages.get_mut(&page_idx) {
+                if stripe_idx < page_protos.len() {
+                    page_protos[stripe_idx] = original;
                 }
             }
         }
