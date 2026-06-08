@@ -10,7 +10,11 @@ echo "==> Installing system dependencies..."
 # Step 2: Build and install the binary
 echo ""
 echo "==> Building and installing tui-pdf..."
-cargo install --path "$SCRIPT_DIR"
+# --locked respects Cargo.lock; without it cargo install re-resolves to the
+# latest semver-compatible patch versions, which has shipped rendering
+# regressions (e.g. ratatui 0.30.1 / ratatui-image 10.0.8 collapsing pages to
+# a single stripe). Keep installs reproducible with the committed lockfile.
+cargo install --path "$SCRIPT_DIR" --locked --force
 
 # Step 3: Install shell completions
 echo ""
