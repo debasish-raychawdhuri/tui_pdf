@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use ratatui::buffer::Buffer;
-use ratatui::layout::Rect;
+use ratatui::layout::{Rect, Size};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
@@ -205,7 +205,7 @@ impl PdfViewState {
         if page >= self.page_count || self.cumulative_stripes.is_empty() {
             return;
         }
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         let pixel_y = (pdf_y * scale) as u32;
         let stripe = (pixel_y / font_height) as usize;
@@ -242,7 +242,7 @@ impl PdfViewState {
 
     pub fn fit_width(&mut self, source: &ContentSource) {
         let (_, _, aw, _) = self.last_render_area.unwrap_or((0, 0, 80, 24));
-        let font_width = self.picker.font_size().0 as f32;
+        let font_width = self.picker.font_size().width as f32;
         let terminal_px = aw as f32 * font_width;
         let page = self.current_page();
         if let Ok((page_w, _)) = source.page_size(page) {
@@ -309,7 +309,7 @@ impl PdfViewState {
         let page_base = self.cumulative_stripes[page];
         let page_stripes = self.page_stripe_counts.get(page).copied().unwrap_or(0);
         let local_stripe = self.global_scroll.saturating_sub(page_base).min(page_stripes.saturating_sub(1));
-        let font_height = self.picker.font_size().1 as f32;
+        let font_height = self.picker.font_size().height as f32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         let pdf_y = (local_stripe as f32 * font_height) / scale;
         (page, pdf_y)
@@ -346,8 +346,8 @@ impl PdfViewState {
         let page_stripes = self.page_stripe_counts.get(page_idx).copied().unwrap_or(0);
         let local_stripe = (g - page_base).min(page_stripes.saturating_sub(1));
 
-        let font_height = self.picker.font_size().1 as f32;
-        let font_width = self.picker.font_size().0 as f32;
+        let font_height = self.picker.font_size().height as f32;
+        let font_width = self.picker.font_size().width as f32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
 
         let pw = self.page_pixel_widths.get(page_idx).copied().unwrap_or(0) as u16;
@@ -369,8 +369,8 @@ impl PdfViewState {
             return None;
         }
 
-        let font_height = self.picker.font_size().1 as f32;
-        let font_width = self.picker.font_size().0 as f32;
+        let font_height = self.picker.font_size().height as f32;
+        let font_width = self.picker.font_size().width as f32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
 
         // PDF y → stripe within page
@@ -395,7 +395,7 @@ impl PdfViewState {
     }
 
     fn recompute_geometry(&mut self, source: &ContentSource) -> Result<()> {
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
         self.page_stripe_counts.clear();
         self.page_pixel_widths.clear();
@@ -419,7 +419,7 @@ impl PdfViewState {
 
     fn page_pixel_size(&self, page_idx: usize) -> (u32, u32) {
         let w = self.page_pixel_widths.get(page_idx).copied().unwrap_or(0);
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let h = self.page_stripe_counts.get(page_idx).copied().unwrap_or(0) as u32 * font_height;
         (w, h)
     }
@@ -461,16 +461,16 @@ impl PdfViewState {
     /// If the stripe is wider than the terminal, crop it to center horizontally.
     fn build_protocol(&self, img: image::DynamicImage) -> Option<Protocol> {
         let font_size = self.picker.font_size();
-        let area_pixel_width = self.render_cols as u32 * font_size.0 as u32;
+        let area_pixel_width = self.render_cols as u32 * font_size.width as u32;
         let img = if area_pixel_width > 0 && img.width() > area_pixel_width {
             let crop_left = (img.width() - area_pixel_width) / 2;
             img.crop_imm(crop_left, 0, area_pixel_width, img.height())
         } else {
             img
         };
-        let w = (img.width() as f32 / font_size.0 as f32).ceil() as u16;
-        let h = (img.height() as f32 / font_size.1 as f32).ceil() as u16;
-        let size = Rect::new(0, 0, w, h);
+        let w = (img.width() as f32 / font_size.width as f32).ceil() as u16;
+        let h = (img.height() as f32 / font_size.height as f32).ceil() as u16;
+        let size = Size::new(w, h);
         self.picker.new_protocol(img, size, Resize::Crop(None)).ok()
     }
 
@@ -494,7 +494,7 @@ impl PdfViewState {
     /// Returns true if there is more work to do.
     pub fn prerender_tick(&mut self, source: &ContentSource) -> bool {
         let cache_key = self.cache_key();
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         if font_height == 0 || self.prerender_pos >= self.prerender_queue.len() {
             return false;
         }
@@ -539,7 +539,7 @@ impl PdfViewState {
             self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
         }
 
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let current = self.current_page();
 
         // Render current page and next page immediately (PNGs + protocols)
@@ -574,7 +574,7 @@ impl PdfViewState {
     /// Call before draw to avoid blank pages when scrolling to uncached regions.
     pub fn ensure_visible_rendered(&mut self, source: &ContentSource) {
         let cache_key = self.cache_key();
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         if font_height == 0 {
             return;
         }
@@ -682,7 +682,7 @@ impl PdfViewState {
         }
 
         // Restore previously highlighted stripes to their base (unhighlighted) versions
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
 
         if link_changed || search_changed {
@@ -836,7 +836,7 @@ impl PdfViewState {
         self.clear_probe_markers();
 
         let cache_key = self.cache_key();
-        let font_height = self.picker.font_size().1 as u32;
+        let font_height = self.picker.font_size().height as u32;
         let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
 
         // Group markers by page
@@ -964,7 +964,7 @@ impl StatefulWidget for PdfWidget {
             let count = stripes_left_in_page.min(rows_left_on_screen);
 
             // Compute horizontal centering offset for this page
-            let font_width = state.picker.font_size().0 as u16;
+            let font_width = state.picker.font_size().width as u16;
             let img_cols = if font_width > 0 {
                 let (pw, _) = state.page_pixel_size(page_idx);
                 ((pw as u16) + font_width - 1) / font_width
@@ -977,7 +977,7 @@ impl StatefulWidget for PdfWidget {
                 0
             };
 
-            if let Some(page_stripes) = state.rendered_pages.get_mut(&page_idx) {
+            if let Some(page_stripes) = state.rendered_pages.get(&page_idx) {
                 for offset in 0..count {
                     let stripe_local = local_stripe + offset;
                     if stripe_local < page_stripes.len() {
@@ -987,10 +987,13 @@ impl StatefulWidget for PdfWidget {
                             width: area.width - x_offset,
                             height: 1,
                         };
-                        Image::new(&mut page_stripes[stripe_local]).render(
-                            row_rect,
-                            buf,
-                        );
+                        // allow_clipping: ratatui-image 11 refuses to render an
+                        // image that doesn't fit the area; our stripes are sized
+                        // to the page width and drawn into a single row, so opt
+                        // into clipping to preserve the v10 behaviour.
+                        Image::new(&page_stripes[stripe_local])
+                            .allow_clipping(true)
+                            .render(row_rect, buf);
                     }
                     screen_row += 1;
                 }

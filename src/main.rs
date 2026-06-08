@@ -825,7 +825,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         };
 
         let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-        picker.set_background_color([0, 0, 0, 255]);
+        picker.set_background_color(Some(image::Rgba([0, 0, 0, 255])));
 
         let mut pdf_state = PdfViewState::new(source.page_count(), picker);
         pdf_state.zoom = saved_zoom;
@@ -939,7 +939,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     Ok(web) => {
                         let mut preview_source = ContentSource::Web(web);
                         let mut picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
-                        picker.set_background_color([0, 0, 0, 255]);
+                        picker.set_background_color(Some(image::Rgba([0, 0, 0, 255])));
                         let mut pdf_state = PdfViewState::new(preview_source.page_count(), picker);
                         if inverted { pdf_state.toggle_invert(&preview_source); }
                         let _ = pdf_state.initial_render(&preview_source);

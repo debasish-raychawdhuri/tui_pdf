@@ -17,8 +17,8 @@ opt-level = 2
 
 [dependencies]
 mupdf = "0.6"
-ratatui = { version = "0.30", features = ["crossterm"] }
-ratatui-image = { version = "10", features = ["crossterm"] }
+ratatui = { version = "0.30.1", features = ["crossterm"] }
+ratatui-image = { version = "11", features = ["crossterm"] }
 crossterm = "0.29"
 image = "0.25"
 thiserror = "2"
