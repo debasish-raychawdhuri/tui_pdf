@@ -33,9 +33,11 @@ fn is_url(s: &str) -> bool {
 
 /// If the given path is a .tex file, find the corresponding PDF.
 /// Strategy:
-/// 1. Same basename with .pdf extension in the same directory
-/// 2. Search .synctex.gz/.synctex files in the directory to find a PDF
-///    that references this .tex file as an input (handles multi-file projects)
+/// 1. Same basename with .pdf extension next to the .tex
+/// 2. Walk up from the .tex's directory, scanning each level for a
+///    .synctex.gz/.synctex file whose Input entries reference this .tex. The
+///    PDF and synctex are often in the project root while the source lives in
+///    a subdirectory (multi-file projects, `latexmk -outdir`, etc.)
 /// 3. Falls back to the original path if nothing is found
 fn resolve_tex_to_pdf(path: &str) -> String {
     let p = std::path::Path::new(path);
@@ -44,45 +46,59 @@ fn resolve_tex_to_pdf(path: &str) -> String {
         return path.to_string();
     }
 
-    let dir = p.parent().unwrap_or(std::path::Path::new("."));
     let canonical_tex = p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
 
-    // 1. Same basename, .pdf extension
+    // 1. Same basename, .pdf extension next to the .tex
     let same_name_pdf = p.with_extension("pdf");
     if same_name_pdf.exists() {
         return same_name_pdf.to_string_lossy().to_string();
     }
 
-    // 2. Scan synctex files in the directory to find which PDF includes this .tex
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let epath = entry.path();
-            let fname = epath.file_name().unwrap_or_default().to_string_lossy().to_string();
-            let is_synctex_gz = fname.ends_with(".synctex.gz");
-            let is_synctex = !is_synctex_gz && fname.ends_with(".synctex");
-            if !is_synctex_gz && !is_synctex {
-                continue;
-            }
-
-            // Derive the PDF path from the synctex filename
-            let pdf_name = if is_synctex_gz {
-                fname.strip_suffix(".synctex.gz").unwrap().to_string() + ".pdf"
-            } else {
-                fname.strip_suffix(".synctex").unwrap().to_string() + ".pdf"
-            };
-            let pdf_path = dir.join(&pdf_name);
-            if !pdf_path.exists() {
-                continue;
-            }
-
-            // Check if this synctex file references our .tex file
-            if synctex_references_tex(&epath, &canonical_tex, dir) {
-                return pdf_path.to_string_lossy().to_string();
-            }
+    // 2. Walk up parent directories, scanning each for a synctex file that
+    //    references this .tex. Bounded to a handful of levels to avoid walking
+    //    to the filesystem root on unrelated trees.
+    let mut dir = canonical_tex.parent();
+    for _ in 0..8 {
+        let Some(d) = dir else { break };
+        if let Some(pdf) = find_pdf_via_synctex(d, &canonical_tex) {
+            return pdf;
         }
+        dir = d.parent();
     }
 
     path.to_string()
+}
+
+/// Scan a single directory for a .synctex(.gz) file whose Input entries
+/// reference `canonical_tex`, returning the sibling PDF path if found.
+fn find_pdf_via_synctex(dir: &std::path::Path, canonical_tex: &std::path::Path) -> Option<String> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let epath = entry.path();
+        let fname = epath.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let is_synctex_gz = fname.ends_with(".synctex.gz");
+        let is_synctex = !is_synctex_gz && fname.ends_with(".synctex");
+        if !is_synctex_gz && !is_synctex {
+            continue;
+        }
+
+        // Derive the PDF path from the synctex filename
+        let pdf_name = if is_synctex_gz {
+            fname.strip_suffix(".synctex.gz").unwrap().to_string() + ".pdf"
+        } else {
+            fname.strip_suffix(".synctex").unwrap().to_string() + ".pdf"
+        };
+        let pdf_path = dir.join(&pdf_name);
+        if !pdf_path.exists() {
+            continue;
+        }
+
+        // Check if this synctex file references our .tex file
+        if synctex_references_tex(&epath, canonical_tex, dir) {
+            return Some(pdf_path.to_string_lossy().to_string());
+        }
+    }
+    None
 }
 
 /// Check whether a synctex file references a given .tex file in its Input entries.
