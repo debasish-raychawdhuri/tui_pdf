@@ -1812,6 +1812,9 @@ enum BrowserItem {
 
 fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::PathBuf>> {
     let mut filter = String::new();
+    // Whether we're in search mode (entered via `/`). While searching every key
+    // types into `filter`; command keys like `m` only act when not searching.
+    let mut searching = false;
     let mut selected: usize = 0;
     // Stack of collection IDs we've navigated into (None = root)
     let mut path_stack: Vec<Option<i64>> = vec![None];
@@ -1884,7 +1887,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
             .split(frame.area());
 
             // Top bar: breadcrumb or search
-            if filter.is_empty() {
+            if !searching {
                 Paragraph::new(Line::from(vec![Span::styled(
                     format!(" {}", breadcrumb),
                     Style::default().fg(Color::Black).bg(Color::Cyan),
@@ -1959,7 +1962,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
             let coll_count = items.iter().filter(|i| matches!(i, BrowserItem::Collection { .. })).count();
             let paper_count = items.len() - coll_count;
             let status = format!(
-                " {} collections, {} papers | /: search | Enter: open | Backspace: back | Esc: quit ",
+                " {} collections, {} papers | /: search | m: metadata | Enter: open | Backspace: back | Esc: quit ",
                 coll_count, paper_count,
             );
             Paragraph::new(Line::from(vec![Span::styled(
@@ -1988,7 +1991,8 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
 
                 match key.code {
                     KeyCode::Esc => {
-                        if !filter.is_empty() {
+                        if searching {
+                            searching = false;
                             filter.clear();
                             selected = 0;
                         } else {
@@ -2001,6 +2005,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                                 BrowserItem::Collection { id, .. } => {
                                     path_stack.push(Some(*id));
                                     selected = 0;
+                                    searching = false;
                                     filter.clear();
                                 }
                                 BrowserItem::Paper { entry_idx } => {
@@ -2010,8 +2015,11 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                         }
                     }
                     KeyCode::Backspace => {
-                        if !filter.is_empty() {
+                        if searching {
                             filter.pop();
+                            if filter.is_empty() {
+                                searching = false;
+                            }
                             selected = 0;
                         } else if path_stack.len() > 1 {
                             path_stack.pop();
@@ -2026,21 +2034,24 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                             selected = (selected + 1).min(items.len() - 1);
                         }
                     }
-                    KeyCode::Char('m') if filter.is_empty() => {
+                    // While searching, every key (including `m` and `/`) types
+                    // into the filter.
+                    KeyCode::Char(c) if searching => {
+                        filter.push(c);
+                        selected = 0;
+                    }
+                    KeyCode::Char('/') => {
+                        searching = true;
+                        filter.clear();
+                        selected = 0;
+                    }
+                    KeyCode::Char('m') => {
                         if let Some(item) = items.get(selected) {
                             if let BrowserItem::Paper { entry_idx } = item {
                                 let e = &library.entries[*entry_idx];
                                 metadata_view = Some(metadata_fields(e));
                             }
                         }
-                    }
-                    KeyCode::Char('/') if filter.is_empty() => {
-                        // Enter search mode - just start accepting characters
-                        // The filter is already empty, typing will populate it
-                    }
-                    KeyCode::Char(c) => {
-                        filter.push(c);
-                        selected = 0;
                     }
                     _ => {}
                 }
