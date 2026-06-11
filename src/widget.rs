@@ -300,6 +300,19 @@ impl PdfViewState {
         self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
     }
 
+    /// Drop all cached protocols so visible stripes are re-encoded and the
+    /// kitty image data is re-transmitted on the next render. The stripe PNG
+    /// cache is kept, so rebuilding is cheap. Needed after an interrupted
+    /// terminal write: kitty transmissions are sent only once per protocol,
+    /// so a transmission cut mid-stream is otherwise lost for good.
+    pub fn invalidate_protocols(&mut self) {
+        self.rendered_pages.clear();
+        self.probe_swapped.clear();
+        self.dirty_highlight_stripes.clear();
+        self.last_link_overlay = None;
+        self.last_search_overlay = None;
+    }
+
     /// Returns (page_0indexed, pdf_y_points) for the current scroll position.
     pub fn current_pdf_position(&self) -> (usize, f32) {
         let page = self.current_page();

@@ -11,6 +11,7 @@ use crossterm::terminal::{
 };
 use crossterm::ExecutableCommand;
 use ratatui::backend::CrosstermBackend;
+use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
@@ -348,6 +349,17 @@ fn send_to_remarkable(path: &str) -> io::Result<String> {
         };
         Err(io::Error::new(io::ErrorKind::Other, msg))
     }
+}
+
+/// Ask the terminal to delete all kitty images and free their data.
+/// Stripe protocols transmit image data once and never delete it, so protocols
+/// dropped on document switches and previews leak terminal memory until kitty
+/// starts evicting images that may still be on screen. Other terminals ignore
+/// the sequence.
+fn free_kitty_images() {
+    let mut out = stdout();
+    let _ = out.write_all(b"\x1b_Ga=d,d=A\x1b\\");
+    let _ = out.flush();
 }
 
 enum AppAction {
@@ -714,6 +726,14 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
     let mut terminal = Terminal::new(backend)?;
 
     loop {
+        // Free kitty images from a previously displayed document and force a
+        // full repaint. ratatui-image 11 draws kitty rows as one escape-laden
+        // cell plus Skip-marked cells that the buffer records as blanks, so
+        // ratatui's diff state does not reflect what is physically on screen;
+        // without a clear, switching documents leaves stale artifacts behind.
+        free_kitty_images();
+        let _ = terminal.clear();
+
         // Save current doc state if we have one open
         if let Some(doc) = open_docs.get_mut(current_idx) {
             // scroll/zoom already saved on switch
@@ -999,6 +1019,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         }
     }
 
+    free_kitty_images();
     let _ = stdout().execute(DisableMouseCapture);
     let _ = disable_raw_mode();
     let _ = stdout().execute(LeaveAlternateScreen);
@@ -1047,7 +1068,18 @@ fn run_app(
     // Metadata view
     let mut metadata_view: Option<Vec<(String, String)>> = None;
 
+    // Kitty image rows leave placeholder characters on screen that ratatui's
+    // diff records as blank cells, so when an overlay opens or closes, cells
+    // the diff considers unchanged keep stale image fragments. Track the view
+    // layout and force a full repaint whenever it changes.
+    let mut prev_view_mode = (false, false, toc_state.visible);
+
     loop {
+        let view_mode = (metadata_view.is_some(), doc_picker.is_some(), toc_state.visible);
+        if view_mode != prev_view_mode {
+            prev_view_mode = view_mode;
+            let _ = terminal.clear();
+        }
         // Progress incremental search
         if search_state.searching {
             let _ = search_state.search_tick(source);
@@ -1260,9 +1292,26 @@ fn run_app(
                     status_area,
                 );
             }
+
+            // Re-emit the status row every frame. The kitty stripes above end
+            // their cursor-restore dance with CSI 0 B (height-1 areas), which
+            // terminals treat as "down 1", parking the real cursor on this row
+            // every frame; bytes from an interrupted write land here, and the
+            // diff would never repaint cells it believes are unchanged.
+            for x in status_area.left()..status_area.right() {
+                if let Some(cell) = frame.buffer_mut().cell_mut((x, status_area.y)) {
+                    cell.set_diff_option(CellDiffOption::AlwaysUpdate);
+                }
+            }
         });
         if let Err(e) = draw_result {
             if e.kind() == io::ErrorKind::WouldBlock {
+                // Part of the frame was written, so the screen no longer
+                // matches ratatui's diff state, and any kitty transmissions
+                // cut mid-stream are gone for good (they are sent only once
+                // per protocol). Rebuild the protocols and repaint everything.
+                pdf_state.invalidate_protocols();
+                let _ = terminal.clear();
                 continue;
             }
             return Err(e);
