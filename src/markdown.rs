@@ -18,9 +18,9 @@ use std::path::{Path, PathBuf};
 use comrak::nodes::{AstNode, ListType, NodeValue};
 use comrak::{parse_document, Arena, Options};
 use printpdf::{
-    Color, FontId, Line, LinePoint, Op, ParsedFont, PdfDocument, PdfFontHandle, PdfPage,
-    PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Mm, PaintMode, RawImage, Rgb, TextItem,
-    WindingOrder, XObjectId, XObjectTransform,
+    Actions, BorderArray, Color, FontId, Line, LinePoint, LinkAnnotation, Op, ParsedFont,
+    PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Polygon, PolygonRing, Pt, Mm,
+    PaintMode, RawImage, Rect, Rgb, TextItem, WindingOrder, XObjectId, XObjectTransform,
 };
 
 use crate::error::{Result, TuiPdfError};
@@ -203,6 +203,8 @@ struct Style {
     face: Face,
     size: f32,
     color: (f32, f32, f32),
+    /// Destination URL when this run is inside a Markdown link.
+    link: Option<String>,
 }
 
 #[derive(Clone)]
@@ -216,6 +218,7 @@ enum Atom {
         color: (f32, f32, f32),
         ascent: f32,
         descent: f32,
+        link: Option<String>,
     },
     /// Breakable whitespace.
     Space { width: f32 },
@@ -249,6 +252,7 @@ enum PlacedKind {
         face: Face,
         size: f32,
         color: (f32, f32, f32),
+        link: Option<String>,
     },
     Box {
         xobj: XObjectId,
@@ -338,6 +342,7 @@ fn wrap(atoms: &[Atom], max_width: f32) -> Vec<LineBox> {
                 color,
                 ascent: a,
                 descent: d,
+                link,
             } => {
                 if !cur.is_empty() && x + pending_space + width > max_width {
                     flush!(false);
@@ -353,6 +358,7 @@ fn wrap(atoms: &[Atom], max_width: f32) -> Vec<LineBox> {
                         face: *face,
                         size: *size,
                         color: *color,
+                        link: link.clone(),
                     },
                 });
                 x += width;
@@ -423,6 +429,14 @@ enum Draw {
         xobj: XObjectId,
         dpi: f32,
     },
+    /// A clickable URI link annotation over the given rectangle.
+    Link {
+        x: f32,
+        top: f32,
+        w: f32,
+        h: f32,
+        url: String,
+    },
     Rect {
         x: f32,
         top: f32,
@@ -490,6 +504,25 @@ impl<'a> Builder<'a> {
         let mut ops: Vec<Op> = Vec::with_capacity(self.draws.len() * 4);
         for d in &self.draws {
             match d {
+                Draw::Link { x, top, w, h, url } => {
+                    let rect = Rect {
+                        x: Pt(*x),
+                        y: Pt(total_h - (top + h)),
+                        width: Pt(*w),
+                        height: Pt(*h),
+                        mode: None,
+                        winding_order: None,
+                    };
+                    ops.push(Op::LinkAnnotation {
+                        link: LinkAnnotation::new(
+                            rect,
+                            Actions::Uri(url.clone()),
+                            Some(BorderArray::Solid([0.0, 0.0, 0.0])), // no visible border
+                            None,
+                            None,
+                        ),
+                    });
+                }
                 Draw::Rect { x, top, w, h, color } => {
                     let y0 = total_h - (top + h);
                     let y1 = total_h - top;
@@ -574,7 +607,17 @@ impl<'a> Builder<'a> {
         self.draws.push(Draw::Line { x0, t0: yt0, x1, t1: yt1, color: c, thick: t });
     }
 
-    fn draw_word(&mut self, x: f32, baseline_top: f32, text: &str, face: Face, size: f32, c: (f32, f32, f32)) {
+    #[allow(clippy::too_many_arguments)]
+    fn draw_word(
+        &mut self,
+        x: f32,
+        baseline_top: f32,
+        text: &str,
+        face: Face,
+        size: f32,
+        c: (f32, f32, f32),
+        link: Option<&str>,
+    ) {
         self.draws.push(Draw::Text {
             x,
             baseline_top,
@@ -583,6 +626,19 @@ impl<'a> Builder<'a> {
             size,
             color: c,
         });
+        if let Some(url) = link {
+            let m = self.faces.metrics(face);
+            let w = self.faces.measure(text, face, size);
+            let top = baseline_top - m.ascent(size);
+            let h = m.ascent(size) + m.descent(size);
+            self.draws.push(Draw::Link {
+                x,
+                top,
+                w,
+                h,
+                url: url.to_string(),
+            });
+        }
     }
 
     fn draw_box(&mut self, x: f32, baseline_top: f32, xobj: &XObjectId, descent: f32, dpi: f32) {
@@ -620,7 +676,8 @@ impl<'a> Builder<'a> {
                                 face,
                                 size,
                                 color,
-                            } => self.draw_word(px, baseline, &text, face, size, color),
+                                link,
+                            } => self.draw_word(px, baseline, &text, face, size, color, link.as_deref()),
                             PlacedKind::Box {
                                 xobj,
                                 descent: d,
@@ -685,6 +742,7 @@ impl<'a> Builder<'a> {
                     face: Face::Bold,
                     size,
                     color: COL_TEXT,
+                    link: None,
                 };
                 let mut atoms = Vec::new();
                 self.inlines(node, &style, &mut atoms);
@@ -697,6 +755,7 @@ impl<'a> Builder<'a> {
                     face: Face::Regular,
                     size: BODY_SIZE,
                     color: COL_TEXT,
+                    link: None,
                 };
                 let mut atoms = Vec::new();
                 self.inlines(node, &style, &mut atoms);
@@ -767,6 +826,7 @@ impl<'a> Builder<'a> {
                     Face::Regular,
                     BODY_SIZE,
                     COL_TEXT,
+                    None,
                 );
             }
         }
@@ -784,6 +844,7 @@ impl<'a> Builder<'a> {
                     face: Face::Italic,
                     size: BODY_SIZE,
                     color: COL_QUOTE,
+                    link: None,
                 };
                 let mut atoms = Vec::new();
                 self.inlines(child, &style, &mut atoms);
@@ -808,7 +869,7 @@ impl<'a> Builder<'a> {
                 self.fill_rect(left, self.y, CONTENT_W - indent, line_h, COL_CODE_BG);
                 let baseline = self.y + self.faces.metrics(Face::Mono).ascent(CODE_SIZE) + 2.0;
                 if !chunk.is_empty() {
-                    self.draw_word(left + CODE_PAD, baseline, &chunk, Face::Mono, CODE_SIZE, COL_CODE);
+                    self.draw_word(left + CODE_PAD, baseline, &chunk, Face::Mono, CODE_SIZE, COL_CODE, None);
                 }
                 self.y += line_h;
             }
@@ -841,6 +902,7 @@ impl<'a> Builder<'a> {
                     face,
                     size: BODY_SIZE,
                     color: COL_TEXT,
+                    link: None,
                 };
                 let mut atoms = Vec::new();
                 self.inlines(cell, &style, &mut atoms);
@@ -869,7 +931,8 @@ impl<'a> Builder<'a> {
                                     face: f,
                                     size,
                                     color,
-                                } => self.draw_word(cx + placed.x, baseline, &text, f, size, color),
+                                    link,
+                                } => self.draw_word(cx + placed.x, baseline, &text, f, size, color, link.as_deref()),
                                 PlacedKind::Box { xobj, descent, dpi } => {
                                     self.draw_box(cx + placed.x, baseline, &xobj, descent, dpi)
                                 }
@@ -906,7 +969,8 @@ impl<'a> Builder<'a> {
                 let code_style = Style {
                     face: Face::Mono,
                     size: style.size * 0.94,
-                    color: COL_CODE,
+                    color: if style.link.is_some() { COL_LINK } else { COL_CODE },
+                    link: style.link.clone(),
                 };
                 self.push_text(&c.literal, &code_style, out);
             }
@@ -929,9 +993,10 @@ impl<'a> Builder<'a> {
                 self.inlines(node, &s, out);
             }
             NodeValue::Strikethrough => self.inlines(node, style, out),
-            NodeValue::Link(_) => {
+            NodeValue::Link(link) => {
                 let s = Style {
                     color: COL_LINK,
+                    link: Some(link.url.clone()),
                     ..style.clone()
                 };
                 self.inlines(node, &s, out);
@@ -965,6 +1030,7 @@ impl<'a> Builder<'a> {
                     color: style.color,
                     ascent: m.ascent(style.size),
                     descent: m.descent(style.size),
+                    link: style.link.clone(),
                 });
             }
         };
@@ -1041,6 +1107,7 @@ impl<'a> Builder<'a> {
                     face: Face::Mono,
                     size: style.size * 0.94,
                     color: COL_ERR,
+                    link: None,
                 };
                 let delim = if display { "$$" } else { "$" };
                 self.push_text(&format!("{delim}{latex}{delim}"), &err_style, out);
