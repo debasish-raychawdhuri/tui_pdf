@@ -1,6 +1,6 @@
 # tui-pdf
 
-A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fidelity images using the Kitty graphics protocol, Sixel, or iTerm2, with vim-style keyboard navigation.
+A fast, feature-rich PDF and Markdown viewer for the terminal. Renders PDF pages as high-fidelity images using the Kitty graphics protocol, Sixel, or iTerm2, with vim-style keyboard navigation.
 
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
@@ -8,6 +8,7 @@ A fast, feature-rich PDF viewer for the terminal. Renders PDF pages as high-fide
 ## Features
 
 - **High-quality rendering** — PDF pages rendered at 192 DPI via MuPDF, displayed using your terminal's native image protocol (Kitty, Sixel, iTerm2, or halfblock fallback)
+- **Markdown with math** — open `.md`/`.markdown` files and view them rendered natively (no browser): GitHub-flavored Markdown plus LaTeX math in `$…$`/`$$…$$` (KaTeX-compatible), laid out on one continuous page. Forward/reverse search and auto-reload work just like LaTeX (see [Markdown](#markdown))
 - **Smooth scrolling** — continuous vertical scrolling across pages with stripe-based rendering and visible page gap separators
 - **Text search** — incremental search across the entire document with highlighted matches (`/` to search, `n`/`p` to navigate results)
 - **Table of contents** — side panel showing document outline with jump-to-page (`t`)
@@ -100,6 +101,9 @@ tui-pdf <path-to-pdf>
 # Open multiple PDFs:
 tui-pdf paper1.pdf paper2.pdf paper3.pdf
 
+# Open a Markdown file (rendered to a PDF, with LaTeX math):
+tui-pdf notes.md
+
 # Browse Zotero library:
 tui-pdf --zotero
 
@@ -184,7 +188,7 @@ tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
 
 ### Markdown
 
-Open a Markdown file (`.md`/`.markdown`) and tui-pdf renders it to a PDF on the fly — natively in Rust, no browser. It handles GitHub-flavored Markdown (headings, lists, task lists, tables, code blocks, blockquotes, images) and **LaTeX math** in `$…$` / `$$…$$`, rendered with a KaTeX-compatible engine.
+Open a Markdown file (`.md`/`.markdown`) and tui-pdf renders it to a PDF on the fly — natively in Rust, no browser. It handles GitHub-flavored Markdown (headings, lists, task lists, tables, code blocks, blockquotes, images) and **LaTeX math** in `$…$` / `$$…$$`, rendered with a KaTeX-compatible engine. The whole document is laid out on a single continuous page sized to its content, so scrolling never breaks mid-section.
 
 Everything that works for PDFs works here, because it *is* a PDF: scroll, zoom, full-text search, and invert. The SyncTeX workflow works too, built from the Markdown source positions (no `synctex` file needed):
 
