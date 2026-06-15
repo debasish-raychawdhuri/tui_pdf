@@ -140,11 +140,35 @@ pub fn synctex_positions(pdf_path: &Path) -> Vec<SyncTexPosition> {
         return Vec::new();
     };
 
-    // Parse Input tags
+    // Parse Input tags and the page-coordinate offsets. The preamble's
+    // `X Offset`/`Y Offset` (in scaled points) must be added to every record's
+    // coordinates to get the position from the page's top-left corner. XeTeX /
+    // xdvipdfmx emits a 1-inch (4736287 sp) offset here; pdfTeX emits 0. Ignoring
+    // it shifts every marker left/up by the offset and pushes records with
+    // negative raw coordinates off the page.
     let mut inputs: HashMap<u32, String> = HashMap::new();
+    let mut x_offset_sp: f64 = 0.0;
+    let mut y_offset_sp: f64 = 0.0;
     let pdf_dir = pdf_path.parent().unwrap_or(Path::new("."));
 
     for line in data.lines() {
+        if let Some(rest) = line.strip_prefix("X Offset:") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                x_offset_sp = v;
+            }
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Y Offset:") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                y_offset_sp = v;
+            }
+            continue;
+        }
+        // NB: do not stop at the `Content:` marker. SyncTeX emits `Input:`
+        // records interspersed throughout the content as files are opened, so
+        // included files (later sections / pages) declare their tags well after
+        // the preamble. The offsets above only ever appear in the preamble, so
+        // scanning the whole file for them is harmless.
         if let Some(rest) = line.strip_prefix("Input:") {
             // Format: tag:filepath
             if let Some((tag_str, filepath)) = rest.split_once(':') {
@@ -201,9 +225,10 @@ pub fn synctex_positions(pdf_path: &Path) -> Vec<SyncTexPosition> {
         let key = (file.clone(), src_line);
         if !seen.insert(key) { continue; }
 
-        // Convert scaled points to PDF points (1 PDF point = 65536 scaled points)
-        let x_pt = (x_sp / 65536.0) as f32;
-        let y_pt = (y_sp / 65536.0) as f32;
+        // Apply the page offsets, then convert scaled points to PDF points
+        // (1 PDF point = 65536 scaled points).
+        let x_pt = ((x_sp + x_offset_sp) / 65536.0) as f32;
+        let y_pt = ((y_sp + y_offset_sp) / 65536.0) as f32;
 
         results.push(SyncTexPosition {
             file: file.clone(),
