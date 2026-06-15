@@ -2,7 +2,6 @@ use tui_pdf::synctex_positions;
 use std::fs;
 use std::io::{self, stdout, BufRead, BufReader, Write};
 use std::os::unix::net::UnixListener;
-use std::path::Path;
 use std::time::{Duration, Instant, SystemTime};
 
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, MouseButton, MouseEventKind, EnableMouseCapture, DisableMouseCapture};
@@ -381,26 +380,46 @@ struct ProbeCell {
     line: usize,
 }
 
+/// A source position projected for the reverse-search probe grid:
+/// `(page, pdf_x, pdf_y, file, line)`.
+type ProbePos = (usize, f32, f32, String, usize);
+
 fn compute_probe_grid(
     pdf_state: &PdfViewState,
-    pdf_path: &Path,
+    source: &ContentSource,
     _area: ratatui::layout::Rect,
 ) -> Vec<ProbeCell> {
-    // Parse synctex file directly to get all source positions,
-    // then filter to those visible on screen.
-    let positions = synctex_positions(pdf_path);
+    // Gather all source positions as (page, x, y, file, line). Markdown uses
+    // the in-memory source map (x at the left margin); LaTeX parses synctex.
+    let positions: Vec<ProbePos> = if source.is_markdown() {
+        let file = source.path_or_url().to_string();
+        source
+            .as_document()
+            .map(|d| {
+                d.md_positions()
+                    .iter()
+                    .map(|l| (l.page, 60.0_f32, l.y, file.clone(), l.line))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        synctex_positions(std::path::Path::new(source.path_or_url()))
+            .into_iter()
+            .map(|p| (p.page, p.x, p.y, p.file, p.line))
+            .collect()
+    };
 
     // Collect visible positions with their terminal coordinates
-    let mut visible: Vec<(u16, u16, &tui_pdf::SyncTexPosition)> = Vec::new();
+    let mut visible: Vec<(u16, u16, &ProbePos)> = Vec::new();
     for pos in &positions {
-        if let Some((row, col)) = pdf_state.pdf_to_terminal(pos.page, pos.x, pos.y) {
+        if let Some((row, col)) = pdf_state.pdf_to_terminal(pos.0, pos.1, pos.2) {
             visible.push((row, col, pos));
         }
     }
 
     // Sort by visual reading order: top-to-bottom, then left-to-right,
     // then by source line (smallest first) so dedup keeps the paragraph start
-    visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.line.cmp(&b.2.line)));
+    visible.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2 .4.cmp(&b.2 .4)));
 
     // Deduplicate by terminal cell — keep only one probe per screen position
     let mut seen_cells = std::collections::HashSet::new();
@@ -413,11 +432,11 @@ fn compute_probe_grid(
         }
         cells.push(ProbeCell {
             number,
-            page: pos.page,
-            pdf_x: pos.x,
-            pdf_y: pos.y,
-            file: pos.file.clone(),
-            line: pos.line,
+            page: pos.0,
+            pdf_x: pos.1,
+            pdf_y: pos.2,
+            file: pos.3.clone(),
+            line: pos.4,
         });
         number += 1;
     }
@@ -1115,10 +1134,24 @@ fn run_app(
                                 (parts[0].parse::<usize>(), parts[1].parse::<usize>())
                             {
                                 let tex_file = parts[2];
-                                if let Some(fwd) =
-                                    synctex_view(std::path::Path::new(source.path_or_url()), tex_file, src_line, col)
-                                {
-                                    pdf_state.scroll_to_point(fwd.page, fwd.y);
+                                // Markdown documents use the in-memory source
+                                // map we built at render time; LaTeX uses the
+                                // synctex CLI. Both yield (page, y-from-top).
+                                let target = if source.is_markdown() {
+                                    source
+                                        .as_document()
+                                        .and_then(|d| d.md_forward(src_line))
+                                } else {
+                                    synctex_view(
+                                        std::path::Path::new(source.path_or_url()),
+                                        tex_file,
+                                        src_line,
+                                        col,
+                                    )
+                                    .map(|fwd| (fwd.page, fwd.y))
+                                };
+                                if let Some((page, y)) = target {
+                                    pdf_state.scroll_to_point(page, y);
                                     status_message = Some((
                                         format!("Forward: {}:{}", tex_file, src_line),
                                         Instant::now(),
@@ -1343,18 +1376,34 @@ fn run_app(
                         if let Some((page, pdf_x, pdf_y)) =
                             pdf_state.terminal_to_pdf(mouse.row, mouse.column)
                         {
-                            match synctex_edit(std::path::Path::new(source.path_or_url()), page + 1, pdf_x, pdf_y) {
-                                Some(result) => {
-                                    if !jump_to_neovim(&result.file, result.line) {
+                            // Markdown reverse-search uses our source map keyed
+                            // on the .md path; LaTeX uses the synctex CLI.
+                            let hit = if source.is_markdown() {
+                                source
+                                    .as_document()
+                                    .and_then(|d| d.md_reverse(page, pdf_y))
+                                    .map(|line| (source.path_or_url().to_string(), line))
+                            } else {
+                                synctex_edit(
+                                    std::path::Path::new(source.path_or_url()),
+                                    page + 1,
+                                    pdf_x,
+                                    pdf_y,
+                                )
+                                .map(|r| (r.file, r.line))
+                            };
+                            match hit {
+                                Some((file, line)) => {
+                                    if !jump_to_neovim(&file, line) {
                                         status_message = Some((
-                                            format!("SyncTeX: {}:{}", result.file, result.line),
+                                            format!("Source: {}:{}", file, line),
                                             Instant::now(),
                                         ));
                                     }
                                 }
                                 None => {
                                     status_message = Some((
-                                        "SyncTeX: no result at click".to_string(),
+                                        "No source location at click".to_string(),
                                         Instant::now(),
                                     ));
                                 }
@@ -1732,7 +1781,7 @@ fn run_app(
                         KeyCode::Char('s') => {
                             if let Some((ax, ay, aw, ah)) = pdf_state.last_render_area {
                                 let area = ratatui::layout::Rect::new(ax, ay, aw, ah);
-                                let grid = compute_probe_grid(pdf_state, std::path::Path::new(source.path_or_url()), area);
+                                let grid = compute_probe_grid(pdf_state, source, area);
                                 if grid.is_empty() {
                                     status_message = Some((
                                         "SyncTeX: no results on visible area".to_string(),

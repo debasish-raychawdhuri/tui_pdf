@@ -182,6 +182,17 @@ tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
 
 **Requirements:** `synctex` CLI tool (usually bundled with TeX distributions), PDF compiled with `pdflatex -synctex=1`, and `$NVIM` environment variable set for reverse search to jump to neovim.
 
+### Markdown
+
+Open a Markdown file (`.md`/`.markdown`) and tui-pdf renders it to a PDF on the fly — natively in Rust, no browser. It handles GitHub-flavored Markdown (headings, lists, task lists, tables, code blocks, blockquotes, images) and **LaTeX math** in `$…$` / `$$…$$`, rendered with a KaTeX-compatible engine.
+
+Everything that works for PDFs works here, because it *is* a PDF: scroll, zoom, full-text search, and invert. The SyncTeX workflow works too, built from the Markdown source positions (no `synctex` file needed):
+
+- **Forward search** and **reverse search** (Ctrl+Click / `s`) jump between the source line and the rendered position, exactly like LaTeX.
+- **Auto-reload:** editing the `.md` and saving re-renders the view, preserving scroll position.
+
+**neovim:** for source highlighting (including math), install the parsers once with `:TSInstall markdown markdown_inline latex` — `markdown_inline` injects the `latex` parser into math spans. Forward search uses `tui-pdf --forward "<line>:1:<file.md>" "<file.md>"`; open the viewer with `$NVIM` set so Ctrl+Click reverse-jumps back to the source.
+
 ### Zotero integration
 
 tui-pdf can browse your local Zotero library and open saved PDFs directly.

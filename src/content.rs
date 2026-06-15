@@ -111,6 +111,11 @@ impl ContentSource {
         matches!(self, ContentSource::Web(_))
     }
 
+    /// True when this is a Markdown document rendered to PDF.
+    pub fn is_markdown(&self) -> bool {
+        matches!(self, ContentSource::Pdf(doc) if doc.is_markdown())
+    }
+
     /// Access the underlying Document (PDF only).
     pub fn as_document(&self) -> Option<&Document> {
         match self {

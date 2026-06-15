@@ -28,7 +28,6 @@ use crate::error::{Result, TuiPdfError};
 // ---- page geometry, in PDF points (1/72 inch) -----------------------------
 const PT_PER_MM: f32 = 72.0 / 25.4;
 const PAGE_W: f32 = 215.9 * PT_PER_MM; // US Letter width  (612 pt)
-const PAGE_H: f32 = 279.4 * PT_PER_MM; // US Letter height (792 pt)
 const MARGIN: f32 = 54.0; // 0.75"
 const CONTENT_W: f32 = PAGE_W - 2.0 * MARGIN;
 const RIGHT: f32 = PAGE_W - MARGIN;
@@ -153,11 +152,11 @@ fn build_pdf_font(bytes: &'static [u8], name: &str) -> ParsedFont {
                 continue;
             }
             subtable.codepoints(|cp| {
-                if let Some(ch) = char::from_u32(cp) {
-                    if let Some(gid) = face.glyph_index(ch) {
-                        cp_to_gid.insert(cp, gid.0);
-                        widths.insert(gid.0, face.glyph_hor_advance(gid).unwrap_or(0));
-                    }
+                if let Some(ch) = char::from_u32(cp)
+                    && let Some(gid) = face.glyph_index(ch)
+                {
+                    cp_to_gid.insert(cp, gid.0);
+                    widths.insert(gid.0, face.glyph_hor_advance(gid).unwrap_or(0));
                 }
             });
         }
@@ -396,14 +395,59 @@ fn wrap(atoms: &[Atom], max_width: f32) -> Vec<LineBox> {
 // ---------------------------------------------------------------------------
 // The builder: walks the AST and accumulates printpdf pages.
 // ---------------------------------------------------------------------------
+/// Maps a Markdown source line to its rendered position, for SyncTeX-style
+/// forward/reverse search. `page` is 0-based; `y` is points from the page top.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceLoc {
+    pub line: usize,
+    pub page: usize,
+    pub y: f32,
+}
+
+/// A drawing command in top-down page coordinates (`y` = distance from the top
+/// of the single continuous page). Markdown renders as one tall page, so the
+/// final PDF y (origin bottom-left) is computed once the total height is known.
+enum Draw {
+    Text {
+        x: f32,
+        baseline_top: f32,
+        text: String,
+        face: Face,
+        size: f32,
+        color: (f32, f32, f32),
+    },
+    Image {
+        x: f32,
+        baseline_top: f32,
+        descent: f32,
+        xobj: XObjectId,
+        dpi: f32,
+    },
+    Rect {
+        x: f32,
+        top: f32,
+        w: f32,
+        h: f32,
+        color: (f32, f32, f32),
+    },
+    Line {
+        x0: f32,
+        t0: f32,
+        x1: f32,
+        t1: f32,
+        color: (f32, f32, f32),
+        thick: f32,
+    },
+}
+
 struct Builder<'a> {
     doc: &'a mut PdfDocument,
     fonts: &'a FontIds,
     faces: &'a Faces,
     base_dir: PathBuf,
-    pages: Vec<Vec<Op>>,
-    ops: Vec<Op>,
+    draws: Vec<Draw>,
     y: f32, // distance from page top, in pt
+    sourcemap: Vec<SourceLoc>,
 }
 
 fn linepoint(x: f32, y: f32) -> LinePoint {
@@ -428,106 +472,126 @@ impl<'a> Builder<'a> {
             fonts,
             faces,
             base_dir,
-            pages: Vec::new(),
-            ops: Vec::new(),
+            draws: Vec::new(),
             y: MARGIN,
+            sourcemap: Vec::new(),
         }
     }
 
-    fn new_page(&mut self) {
-        let ops = std::mem::take(&mut self.ops);
-        self.pages.push(ops);
-        self.y = MARGIN;
-    }
+    // Markdown renders as one continuous page; there are no page breaks, so
+    // this is a no-op kept at the former break points for clarity.
+    fn ensure(&mut self, _h: f32) {}
 
-    fn ensure(&mut self, h: f32) {
-        if self.y + h > PAGE_H - MARGIN {
-            self.new_page();
+    /// Emit a single page whose height equals the laid-out content (plus a
+    /// bottom margin), converting the top-down draw commands to bottom-origin
+    /// PDF ops now that the total height is known.
+    fn finish(self) -> Vec<PdfPage> {
+        let total_h = self.y + MARGIN;
+        let mut ops: Vec<Op> = Vec::with_capacity(self.draws.len() * 4);
+        for d in &self.draws {
+            match d {
+                Draw::Rect { x, top, w, h, color } => {
+                    let y0 = total_h - (top + h);
+                    let y1 = total_h - top;
+                    ops.push(Op::SetFillColor {
+                        col: Color::Rgb(rgb(color.0, color.1, color.2)),
+                    });
+                    ops.push(Op::DrawPolygon {
+                        polygon: Polygon {
+                            rings: vec![PolygonRing {
+                                points: vec![
+                                    linepoint(*x, y0),
+                                    linepoint(*x + *w, y0),
+                                    linepoint(*x + *w, y1),
+                                    linepoint(*x, y1),
+                                ],
+                            }],
+                            mode: PaintMode::Fill,
+                            winding_order: WindingOrder::NonZero,
+                        },
+                    });
+                }
+                Draw::Line { x0, t0, x1, t1, color, thick } => {
+                    ops.push(Op::SetOutlineColor {
+                        col: Color::Rgb(rgb(color.0, color.1, color.2)),
+                    });
+                    ops.push(Op::SetOutlineThickness { pt: Pt(*thick) });
+                    ops.push(Op::DrawLine {
+                        line: Line {
+                            points: vec![
+                                linepoint(*x0, total_h - *t0),
+                                linepoint(*x1, total_h - *t1),
+                            ],
+                            is_closed: false,
+                        },
+                    });
+                }
+                Draw::Text { x, baseline_top, text, face, size, color } => {
+                    ops.push(Op::StartTextSection);
+                    ops.push(Op::SetFont {
+                        font: self.fonts.handle(*face),
+                        size: Pt(*size),
+                    });
+                    ops.push(Op::SetFillColor {
+                        col: Color::Rgb(rgb(color.0, color.1, color.2)),
+                    });
+                    ops.push(Op::SetTextCursor {
+                        pos: Point {
+                            x: Pt(*x),
+                            y: Pt(total_h - *baseline_top),
+                        },
+                    });
+                    ops.push(Op::ShowText {
+                        items: vec![TextItem::Text(text.clone())],
+                    });
+                    ops.push(Op::EndTextSection);
+                }
+                Draw::Image { x, baseline_top, descent, xobj, dpi } => {
+                    let ll_y = total_h - (baseline_top + descent);
+                    ops.push(Op::UseXobject {
+                        id: xobj.clone(),
+                        transform: XObjectTransform {
+                            translate_x: Some(Pt(*x)),
+                            translate_y: Some(Pt(ll_y)),
+                            rotate: None,
+                            scale_x: None,
+                            scale_y: None,
+                            dpi: Some(*dpi),
+                        },
+                    });
+                }
+            }
         }
+        vec![PdfPage::new(Mm(PAGE_W / PT_PER_MM), Mm(total_h / PT_PER_MM), ops)]
     }
 
-    fn finish(mut self) -> Vec<PdfPage> {
-        let last = std::mem::take(&mut self.ops);
-        self.pages.push(last);
-        self.pages
-            .into_iter()
-            .map(|ops| PdfPage::new(Mm(215.9), Mm(279.4), ops))
-            .collect()
-    }
-
-    // -- primitive drawing --------------------------------------------------
+    // -- primitive drawing (records top-down commands) ---------------------
     fn fill_rect(&mut self, x: f32, y_top: f32, w: f32, h: f32, c: (f32, f32, f32)) {
-        let y0 = PAGE_H - (y_top + h);
-        let y1 = PAGE_H - y_top;
-        self.ops.push(Op::SetFillColor {
-            col: Color::Rgb(rgb(c.0, c.1, c.2)),
-        });
-        self.ops.push(Op::DrawPolygon {
-            polygon: Polygon {
-                rings: vec![PolygonRing {
-                    points: vec![
-                        linepoint(x, y0),
-                        linepoint(x + w, y0),
-                        linepoint(x + w, y1),
-                        linepoint(x, y1),
-                    ],
-                }],
-                mode: PaintMode::Fill,
-                winding_order: WindingOrder::NonZero,
-            },
-        });
+        self.draws.push(Draw::Rect { x, top: y_top, w, h, color: c });
     }
 
     fn stroke_line(&mut self, x0: f32, yt0: f32, x1: f32, yt1: f32, c: (f32, f32, f32), t: f32) {
-        self.ops.push(Op::SetOutlineColor {
-            col: Color::Rgb(rgb(c.0, c.1, c.2)),
-        });
-        self.ops.push(Op::SetOutlineThickness { pt: Pt(t) });
-        self.ops.push(Op::DrawLine {
-            line: Line {
-                points: vec![
-                    linepoint(x0, PAGE_H - yt0),
-                    linepoint(x1, PAGE_H - yt1),
-                ],
-                is_closed: false,
-            },
-        });
+        self.draws.push(Draw::Line { x0, t0: yt0, x1, t1: yt1, color: c, thick: t });
     }
 
     fn draw_word(&mut self, x: f32, baseline_top: f32, text: &str, face: Face, size: f32, c: (f32, f32, f32)) {
-        self.ops.push(Op::StartTextSection);
-        self.ops.push(Op::SetFont {
-            font: self.fonts.handle(face),
-            size: Pt(size),
+        self.draws.push(Draw::Text {
+            x,
+            baseline_top,
+            text: text.to_string(),
+            face,
+            size,
+            color: c,
         });
-        self.ops.push(Op::SetFillColor {
-            col: Color::Rgb(rgb(c.0, c.1, c.2)),
-        });
-        self.ops.push(Op::SetTextCursor {
-            pos: Point {
-                x: Pt(x),
-                y: Pt(PAGE_H - baseline_top),
-            },
-        });
-        self.ops.push(Op::ShowText {
-            items: vec![TextItem::Text(text.to_string())],
-        });
-        self.ops.push(Op::EndTextSection);
     }
 
     fn draw_box(&mut self, x: f32, baseline_top: f32, xobj: &XObjectId, descent: f32, dpi: f32) {
-        // lower-left corner of the image, in bottom-origin coordinates
-        let ll_y = PAGE_H - (baseline_top + descent);
-        self.ops.push(Op::UseXobject {
-            id: xobj.clone(),
-            transform: XObjectTransform {
-                translate_x: Some(Pt(x)),
-                translate_y: Some(Pt(ll_y)),
-                rotate: None,
-                scale_x: None,
-                scale_y: None,
-                dpi: Some(dpi),
-            },
+        self.draws.push(Draw::Image {
+            x,
+            baseline_top,
+            descent,
+            xobj: xobj.clone(),
+            dpi,
         });
     }
 
@@ -594,6 +658,17 @@ impl<'a> Builder<'a> {
     }
 
     fn block(&mut self, node: &'a AstNode<'a>, indent: f32) {
+        // Record where this block's source line lands in the rendered PDF, for
+        // forward/reverse search. `pages.len()` is the page currently being
+        // built; `y` is the cursor measured from the page top.
+        let start_line = node.data.borrow().sourcepos.start.line;
+        if start_line > 0 {
+            self.sourcemap.push(SourceLoc {
+                line: start_line,
+                page: 0, // single continuous page
+                y: self.y,
+            });
+        }
         let value = node.data.borrow().value.clone();
         match value {
             NodeValue::Heading(h) => {
@@ -1063,8 +1138,14 @@ fn wrap_mono(line: &str, max_width: f32, faces: &Faces) -> Vec<String> {
     chunks
 }
 
-/// Render a Markdown file to PDF bytes.
+/// Render a Markdown file to PDF bytes (discarding the source map).
 pub fn render_to_pdf_bytes(path: &Path) -> Result<Vec<u8>> {
+    Ok(render(path)?.0)
+}
+
+/// Render a Markdown file to PDF bytes plus a source-line → PDF-position map
+/// (sorted by page then y) for SyncTeX-style forward/reverse search.
+pub fn render(path: &Path) -> Result<(Vec<u8>, Vec<SourceLoc>)> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| TuiPdfError::Other(format!("Failed to read markdown {}: {}", path.display(), e)))?;
 
@@ -1095,14 +1176,20 @@ pub fn render_to_pdf_bytes(path: &Path) -> Result<Vec<u8>> {
     let faces = Faces::new();
     let base_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
 
-    let pages = {
+    let (pages, mut sourcemap) = {
         let mut builder = Builder::new(&mut doc, &fonts, &faces, base_dir);
         builder.blocks(root, 0.0);
-        builder.finish()
+        let map = std::mem::take(&mut builder.sourcemap);
+        (builder.finish(), map)
     };
+    sourcemap.sort_by(|a, b| {
+        a.page
+            .cmp(&b.page)
+            .then(a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal))
+    });
 
     doc.with_pages(pages);
     let mut warnings = Vec::new();
     let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
-    Ok(bytes)
+    Ok((bytes, sourcemap))
 }
