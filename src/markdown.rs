@@ -7,13 +7,22 @@
 //!   * `ratex` (KaTeX-compatible, pure Rust) renders each math span to a PNG,
 //!     embedded inline and baseline-aligned using the display-list metrics.
 //!
-//! Known v1 limitations (acceptable, documented here): code blocks are not
-//! syntax-highlighted; a single block (image / math) taller than the page is
-//! scaled to fit rather than split; strikethrough text is rendered without a
-//! strike line.
+//! Fenced code blocks are syntax-highlighted with `syntect` (pure-Rust regex
+//! backend) using the light "InspiredGitHub" theme to suit the pale code
+//! background.
+//!
+//! Known v1 limitations (acceptable, documented here): a single block (image /
+//! math) taller than the page is scaled to fit rather than split; strikethrough
+//! text is rendered without a strike line.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use syntect::easy::HighlightLines;
+use syntect::highlighting::ThemeSet;
+use syntect::parsing::SyntaxSet;
+use syntect::util::LinesWithEndings;
 
 use comrak::nodes::{AstNode, ListType, NodeValue};
 use comrak::{parse_document, Arena, Options};
@@ -767,7 +776,7 @@ impl<'a> Builder<'a> {
                 self.list(node, indent);
                 self.y += BODY_SIZE * 0.3;
             }
-            NodeValue::CodeBlock(cb) => self.code_block(&cb.literal, indent),
+            NodeValue::CodeBlock(cb) => self.code_block(&cb.literal, &cb.info, indent),
             NodeValue::BlockQuote | NodeValue::MultilineBlockQuote(_) => {
                 self.y += BODY_SIZE * 0.2;
                 self.quote(node, indent);
@@ -857,19 +866,26 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn code_block(&mut self, literal: &str, indent: f32) {
+    fn code_block(&mut self, literal: &str, info: &str, indent: f32) {
         let left = MARGIN + indent;
         let avail = CONTENT_W - indent - 2.0 * CODE_PAD;
         let line_h = CODE_SIZE * 1.4;
         self.y += BODY_SIZE * 0.3;
-        for raw in literal.trim_end_matches('\n').split('\n') {
-            // character-wrap long lines
-            for chunk in wrap_mono(raw, avail, self.faces) {
+        // The info string is like "rust" or "python {.numberLines}"; the first
+        // token is the language used to pick a syntect syntax definition.
+        let lang = info.split_whitespace().next().unwrap_or("");
+        for spans in highlight_code(literal, lang) {
+            // character-wrap long lines, preserving the per-token colours
+            for visual in wrap_spans(&spans, avail, self.faces) {
                 self.ensure(line_h);
                 self.fill_rect(left, self.y, CONTENT_W - indent, line_h, COL_CODE_BG);
                 let baseline = self.y + self.faces.metrics(Face::Mono).ascent(CODE_SIZE) + 2.0;
-                if !chunk.is_empty() {
-                    self.draw_word(left + CODE_PAD, baseline, &chunk, Face::Mono, CODE_SIZE, COL_CODE, None);
+                let mut x = left + CODE_PAD;
+                for (text, color) in visual {
+                    if !text.is_empty() {
+                        self.draw_word(x, baseline, &text, Face::Mono, CODE_SIZE, color, None);
+                        x += self.faces.measure(&text, Face::Mono, CODE_SIZE);
+                    }
                 }
                 self.y += line_h;
             }
@@ -1183,26 +1199,96 @@ impl<'a> Builder<'a> {
     }
 }
 
-// character-wrap a code line to a pixel width, returning chunks
-fn wrap_mono(line: &str, max_width: f32, faces: &Faces) -> Vec<String> {
-    if line.is_empty() {
-        return vec![String::new()];
+/// One highlighted span: its text and RGB colour.
+type CodeSpan = (String, (f32, f32, f32));
+
+/// Lazily-loaded syntect syntax + theme assets (loading parses bundled binary
+/// dumps, so we do it once for the whole process).
+fn syntax_assets() -> &'static (SyntaxSet, ThemeSet) {
+    static ASSETS: OnceLock<(SyntaxSet, ThemeSet)> = OnceLock::new();
+    ASSETS.get_or_init(|| (SyntaxSet::load_defaults_newlines(), ThemeSet::load_defaults()))
+}
+
+/// Syntax-highlight a code block, returning one span list per source line.
+/// Falls back to plain monospace colour when the language is unknown.
+fn highlight_code(literal: &str, lang: &str) -> Vec<Vec<CodeSpan>> {
+    let (ps, ts) = syntax_assets();
+    let syntax = (!lang.is_empty())
+        .then(|| ps.find_syntax_by_token(lang))
+        .flatten()
+        .unwrap_or_else(|| ps.find_syntax_plain_text());
+    // Light theme to match the pale (0.95) code background.
+    let theme = &ts.themes["InspiredGitHub"];
+    let mut hl = HighlightLines::new(syntax, theme);
+    let mut out = Vec::new();
+    // Feed each line *with* its trailing newline: syntect relies on the `\n` to
+    // close line-scoped contexts (e.g. shell `#` comments), otherwise the
+    // comment state bleeds into every following line. Strip it for rendering.
+    for line in LinesWithEndings::from(literal) {
+        let spans = match hl.highlight_line(line, ps) {
+            Ok(ranges) => ranges
+                .into_iter()
+                .filter_map(|(st, txt)| {
+                    let txt = txt.trim_end_matches('\n');
+                    if txt.is_empty() {
+                        return None;
+                    }
+                    let c = st.foreground;
+                    Some((
+                        txt.to_string(),
+                        (c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0),
+                    ))
+                })
+                .collect(),
+            Err(_) => vec![(line.trim_end_matches('\n').to_string(), COL_CODE)],
+        };
+        out.push(spans);
     }
+    out
+}
+
+// character-wrap a list of coloured code spans to a pixel width, returning
+// visual lines that each preserve the per-character colour.
+fn wrap_spans(spans: &[CodeSpan], max_width: f32, faces: &Faces) -> Vec<Vec<CodeSpan>> {
     let m = faces.metrics(Face::Mono);
-    let mut chunks = Vec::new();
-    let mut cur = String::new();
+    // Flatten to coloured characters so wrapping can break anywhere.
+    let mut chars: Vec<(char, (f32, f32, f32))> = Vec::new();
+    for (text, color) in spans {
+        for ch in text.chars() {
+            chars.push((ch, *color));
+        }
+    }
+    if chars.is_empty() {
+        return vec![Vec::new()]; // empty line: still draws its background row
+    }
+    // Wrap into visual lines of coloured characters.
+    let mut vlines: Vec<Vec<(char, (f32, f32, f32))>> = Vec::new();
+    let mut cur: Vec<(char, (f32, f32, f32))> = Vec::new();
     let mut w = 0.0f32;
-    for ch in line.chars() {
+    for (ch, color) in chars {
         let cw = m.advance(ch, CODE_SIZE);
         if w + cw > max_width && !cur.is_empty() {
-            chunks.push(std::mem::take(&mut cur));
+            vlines.push(std::mem::take(&mut cur));
             w = 0.0;
         }
-        cur.push(ch);
+        cur.push((ch, color));
         w += cw;
     }
-    chunks.push(cur);
-    chunks
+    vlines.push(cur);
+    // Coalesce runs of the same colour back into spans for fewer draw calls.
+    vlines
+        .into_iter()
+        .map(|vl| {
+            let mut out: Vec<CodeSpan> = Vec::new();
+            for (ch, color) in vl {
+                match out.last_mut() {
+                    Some(last) if last.1 == color => last.0.push(ch),
+                    _ => out.push((ch.to_string(), color)),
+                }
+            }
+            out
+        })
+        .collect()
 }
 
 /// Render a Markdown file to PDF bytes (discarding the source map).

@@ -4174,6 +4174,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "syntect",
  "thiserror 2.0.18",
  "toml",
  "ttf-parser",

@@ -188,7 +188,7 @@ tui-pdf supports bidirectional SyncTeX for LaTeX editing workflows.
 
 ### Markdown
 
-Open a Markdown file (`.md`/`.markdown`) and tui-pdf renders it to a PDF on the fly — natively in Rust, no browser. It handles GitHub-flavored Markdown (headings, lists, task lists, tables, code blocks, blockquotes, images) and **LaTeX math** in `$…$` / `$$…$$`, rendered with a KaTeX-compatible engine. The whole document is laid out on a single continuous page sized to its content, so scrolling never breaks mid-section.
+Open a Markdown file (`.md`/`.markdown`) and tui-pdf renders it to a PDF on the fly — natively in Rust, no browser. It handles GitHub-flavored Markdown (headings, lists, task lists, tables, syntax-highlighted code blocks, blockquotes, images) and **LaTeX math** in `$…$` / `$$…$$`, rendered with a KaTeX-compatible engine. The whole document is laid out on a single continuous page sized to its content, so scrolling never breaks mid-section.
 
 Everything that works for PDFs works here, because it *is* a PDF: scroll, zoom, full-text search, and invert. The SyncTeX workflow works too, built from the Markdown source positions (no `synctex` file needed):
 

@@ -36,3 +36,6 @@ ratex-layout = "0.1"
 ratex-parser = "0.1"
 ratex-types = "0.1"
 ttf-parser = "0.25"
+# pure-Rust regex backend (fancy-regex) so we don't pull in the C `onig` lib;
+# keeps default syntaxes + themes for code-block highlighting.
+syntect = { version = "5.2", default-features = false, features = ["default-fancy"] }
