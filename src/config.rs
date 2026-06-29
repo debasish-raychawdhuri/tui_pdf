@@ -100,8 +100,30 @@ pub fn save_config(config: &Config) -> io::Result<()> {
     fs::write(&path, contents)
 }
 
-/// Convert an absolute path under Zotero storage to `zotero://KEY/file.pdf`,
-/// or return the path unchanged if it's not under the Zotero storage dir.
+fn home_dir() -> Option<PathBuf> {
+    std::env::var("HOME").ok().map(PathBuf::from).filter(|p| !p.as_os_str().is_empty())
+}
+
+/// Resolve a path to an absolute path, even if the file no longer exists.
+/// Uses `canonicalize` when possible, otherwise joins with the current dir.
+fn absolutize(path: &str) -> PathBuf {
+    let p = Path::new(path);
+    if let Ok(abs) = p.canonicalize() {
+        return abs;
+    }
+    if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(p))
+            .unwrap_or_else(|_| p.to_path_buf())
+    }
+}
+
+/// Convert an absolute path under Zotero storage to `zotero://KEY/file.pdf`.
+/// Otherwise absolutize the path and, if it lives under the user's home
+/// directory, store it home-relative as `~/file.pdf` so sessions don't depend
+/// on the directory they were opened from.
 fn to_portable_path(path: &str, zotero_dir: Option<&str>) -> String {
     if let Some(zdir) = zotero_dir {
         let storage = Path::new(zdir).join("storage");
@@ -113,16 +135,32 @@ fn to_portable_path(path: &str, zotero_dir: Option<&str>) -> String {
             }
         }
     }
-    path.to_string()
+    let abs = absolutize(path);
+    if let Some(home) = home_dir() {
+        if let Ok(rel) = abs.strip_prefix(&home) {
+            return Path::new("~").join(rel).to_string_lossy().to_string();
+        }
+    }
+    abs.to_string_lossy().to_string()
 }
 
 /// Resolve a portable path back to an absolute path.
-/// `zotero://KEY/file.pdf` becomes `<zotero_dir>/storage/KEY/file.pdf`.
+/// `zotero://KEY/file.pdf` becomes `<zotero_dir>/storage/KEY/file.pdf`, and a
+/// leading `~` expands to the user's home directory.
 fn from_portable_path(path: &str, zotero_dir: Option<&str>) -> String {
     if let Some(rest) = path.strip_prefix("zotero://") {
         if let Some(zdir) = zotero_dir {
             return Path::new(zdir).join("storage").join(rest)
                 .to_string_lossy().to_string();
+        }
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = home_dir() {
+            return home.join(rest).to_string_lossy().to_string();
+        }
+    } else if path == "~" {
+        if let Some(home) = home_dir() {
+            return home.to_string_lossy().to_string();
         }
     }
     path.to_string()
