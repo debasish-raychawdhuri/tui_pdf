@@ -4,6 +4,7 @@ pub mod document;
 pub mod error;
 pub mod links;
 pub mod markdown;
+pub mod remarkable;
 pub mod renderer;
 pub mod search;
 pub mod synctex;

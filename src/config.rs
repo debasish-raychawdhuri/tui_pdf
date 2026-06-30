@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub zotero_dir: Option<String>,
     pub sessions_dir: Option<String>,
+    pub remarkable_host: Option<String>,
+}
+
+impl Config {
+    /// SSH host of the reMarkable (USB default `10.11.99.1`).
+    pub fn remarkable_host(&self) -> String {
+        self.remarkable_host.clone().unwrap_or_else(|| "10.11.99.1".to_string())
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -13,6 +21,17 @@ pub struct SessionDoc {
     pub path: String,
     pub scroll: usize,
     pub zoom: f32,
+    /// Cross-device reading position (0-based page index). `None` for legacy
+    /// sessions written before page tracking existed.
+    #[serde(default)]
+    pub page: Option<usize>,
+    /// Unix epoch seconds when this doc's position last changed on the computer.
+    /// Used for latest-wins reconciliation against the reMarkable.
+    #[serde(default)]
+    pub modified: i64,
+    /// reMarkable document UUID assigned on first sync; the dedup key.
+    #[serde(default)]
+    pub remarkable_uuid: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -189,6 +208,9 @@ pub fn save_session(name: &str, session: &Session) -> io::Result<()> {
             path: to_portable_path(&d.path, zotero_dir),
             scroll: d.scroll,
             zoom: d.zoom,
+            page: d.page,
+            modified: d.modified,
+            remarkable_uuid: d.remarkable_uuid.clone(),
         }).collect(),
         current: session.current,
     };

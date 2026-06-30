@@ -191,11 +191,22 @@ fn render_metadata_overlay(
 }
 
 fn build_session(open_docs: &[OpenDoc], current_idx: usize, pdf_state: &PdfViewState) -> Session {
+    let now = tui_pdf::remarkable::now_secs();
     Session {
-        docs: open_docs.iter().enumerate().map(|(i, d)| SessionDoc {
-            path: d.path.clone(),
-            scroll: if i == current_idx { pdf_state.global_scroll } else { d.scroll },
-            zoom: if i == current_idx { pdf_state.zoom } else { d.zoom },
+        docs: open_docs.iter().enumerate().map(|(i, d)| {
+            let is_current = i == current_idx;
+            let page = if is_current { Some(pdf_state.current_page()) } else { d.page };
+            // Bump the position timestamp only when the page actually changed,
+            // so merely viewing a doc doesn't make the computer win a sync.
+            let modified = if is_current && page != d.page { now } else { d.modified };
+            SessionDoc {
+                path: d.path.clone(),
+                scroll: if is_current { pdf_state.global_scroll } else { d.scroll },
+                zoom: if is_current { pdf_state.zoom } else { d.zoom },
+                page,
+                modified,
+                remarkable_uuid: d.remarkable_uuid.clone(),
+            }
         }).collect(),
         current: current_idx,
     }
@@ -350,6 +361,274 @@ fn send_to_remarkable(path: &str) -> io::Result<String> {
     }
 }
 
+/// Display name for a document on the device: the Zotero title if the file is a
+/// Zotero attachment, otherwise the file stem. Sanitized for use as a name.
+fn device_display_name(path: &str, zotero_dir: Option<&str>) -> String {
+    if let Some(dir) = zotero_dir {
+        if let Some(entry) = lookup_by_path(std::path::Path::new(dir), std::path::Path::new(path)) {
+            if !entry.title.trim().is_empty() {
+                return sanitize_name(&entry.title);
+            }
+        }
+    }
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "document".to_string());
+    sanitize_name(&stem)
+}
+
+fn sanitize_name(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c == '/' || c.is_control() { ' ' } else { c })
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// True for documents we sync to the device: local PDFs only (skip URLs and
+/// Markdown, which reMarkable can't open natively).
+fn is_syncable_pdf(path: &str) -> bool {
+    if is_url(path) {
+        return false;
+    }
+    let lower = path.to_lowercase();
+    if lower.ends_with(".md") || lower.ends_with(".markdown") {
+        return false;
+    }
+    true
+}
+
+/// Convert a saved scroll (stripe) offset into a page index, replicating the
+/// viewer's geometry (`PdfViewState::recompute_geometry`). Used to migrate
+/// sessions that stored a scroll offset before page tracking existed.
+fn scroll_to_page(source: &ContentSource, zoom: f32, font_height: u32, scroll: usize) -> usize {
+    const PAGE_GAP: usize = 1; // matches widget.rs
+    let n = source.page_count();
+    let mut starts = Vec::with_capacity(n);
+    let mut cumulative = 0usize;
+    for i in 0..n {
+        if i > 0 {
+            cumulative += PAGE_GAP;
+        }
+        starts.push(cumulative);
+        cumulative += source.compute_stripe_count(i, zoom, font_height).unwrap_or(1);
+    }
+    match starts.binary_search(&scroll) {
+        Ok(i) => i,
+        Err(i) => i.saturating_sub(1),
+    }
+}
+
+/// Find an existing child collection by name under `parent`, or create it.
+fn ensure_collection(
+    host: &str,
+    index: &mut Vec<tui_pdf::remarkable::RmItem>,
+    name: &str,
+    parent: &str,
+) -> io::Result<String> {
+    if let Some(item) = index
+        .iter()
+        .find(|it| it.is_collection && it.parent == parent && it.visible_name == name)
+    {
+        return Ok(item.uuid.clone());
+    }
+    let uuid = tui_pdf::remarkable::create_collection(host, name, parent)?;
+    index.push(tui_pdf::remarkable::RmItem {
+        uuid: uuid.clone(),
+        visible_name: name.to_string(),
+        parent: parent.to_string(),
+        is_collection: true,
+        last_opened_page: 0,
+        activity_ms: 0,
+    });
+    Ok(uuid)
+}
+
+/// Sync every saved session to/from the reMarkable over SSH. For each session:
+/// create a `tui-pdf/<session>` folder, upload missing PDFs (named by Zotero
+/// title), never re-upload existing ones (annotation-safe), and reconcile the
+/// reading position with latest-time-wins.
+fn sync_sessions(only: &[String]) -> io::Result<()> {
+    use tui_pdf::remarkable as rm;
+
+    let config = load_config();
+    let host = config.remarkable_host();
+    let zotero_dir = config.zotero_dir.clone();
+
+    rm::preflight(&host)?;
+    println!("Connected to reMarkable at {host}");
+
+    let mut sessions = list_sessions();
+    if !only.is_empty() {
+        // Restrict to the named sessions; fail loudly if any don't exist.
+        for name in only {
+            if !sessions.iter().any(|s| s == name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("session '{name}' not found"),
+                ));
+            }
+        }
+        sessions.retain(|s| only.iter().any(|n| n == s));
+    }
+    if sessions.is_empty() {
+        println!("No saved sessions to sync.");
+        return Ok(());
+    }
+
+    // Terminal font height, so we can convert a scroll offset → page the same
+    // way the viewer does (for sessions that predate page tracking).
+    let font_height = Picker::from_query_stdio()
+        .unwrap_or_else(|_| Picker::halfblocks())
+        .font_size()
+        .height as u32;
+
+    // NB: we never stop xochitl — that blanks the device and breaks the USB
+    // link mid-sync. We write sidecars while it runs and restart it once at the
+    // end (only if something changed) so new documents appear.
+    let mut index = rm::read_index(&host)?;
+    let mut device_changed = false;
+
+    let root_uuid = ensure_collection(&host, &mut index, "tui-pdf", "")?;
+
+    for name in &sessions {
+        let mut session = match load_session(name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let folder_uuid = ensure_collection(&host, &mut index, name, &root_uuid)?;
+
+        let (mut uploaded, mut existing, mut pushed, mut pulled) = (0u32, 0u32, 0u32, 0u32);
+        let mut changed = false;
+
+        for doc in &mut session.docs {
+            let path = doc.path.clone();
+            if !is_syncable_pdf(&path) {
+                continue;
+            }
+            if !std::path::Path::new(&path).exists() {
+                continue;
+            }
+            let dev_name = device_display_name(&path, zotero_dir.as_deref());
+
+            // Open the PDF for its page count and, for sessions that predate
+            // page tracking, to convert the saved scroll offset into a page.
+            let source = match Document::open(&path) {
+                Ok(d) => ContentSource::Pdf(d),
+                Err(_) => continue,
+            };
+            let page_count = source.page_count();
+            if page_count == 0 {
+                continue;
+            }
+            let last_page = page_count - 1;
+            let was_legacy = doc.page.is_none();
+            let computer_page = match doc.page {
+                Some(p) => p.min(last_page),
+                None => scroll_to_page(&source, doc.zoom, font_height, doc.scroll).min(last_page),
+            };
+
+            // Identify the device document: stored UUID first, else match an
+            // existing document by name within this session's folder.
+            let dev_uuid = doc
+                .remarkable_uuid
+                .clone()
+                .filter(|u| index.iter().any(|it| &it.uuid == u && !it.is_collection))
+                .or_else(|| {
+                    index
+                        .iter()
+                        .find(|it| {
+                            !it.is_collection
+                                && it.parent == folder_uuid
+                                && it.visible_name == dev_name
+                        })
+                        .map(|it| it.uuid.clone())
+                });
+
+            match dev_uuid {
+                None => {
+                    let new_uuid = rm::upload_pdf(
+                        &host, &path, &dev_name, &folder_uuid, page_count, computer_page,
+                    )?;
+                    doc.remarkable_uuid = Some(new_uuid.clone());
+                    doc.page = Some(computer_page);
+                    doc.modified = rm::now_secs();
+                    changed = true;
+                    uploaded += 1;
+                    index.push(rm::RmItem {
+                        uuid: new_uuid,
+                        visible_name: dev_name,
+                        parent: folder_uuid.clone(),
+                        is_collection: false,
+                        last_opened_page: computer_page as i64,
+                        activity_ms: rm::now_ms(),
+                    });
+                }
+                Some(u) => {
+                    existing += 1;
+                    if doc.remarkable_uuid.as_deref() != Some(u.as_str()) {
+                        doc.remarkable_uuid = Some(u.clone());
+                        changed = true;
+                    }
+                    let item = match index.iter().find(|it| it.uuid == u).cloned() {
+                        Some(it) => it,
+                        None => continue,
+                    };
+                    let device_ms = item.activity_ms;
+                    let device_page = item.last_opened_page.max(0) as usize;
+                    let computer_ms = doc.modified.saturating_mul(1000);
+
+                    // Latest-wins — except a legacy session being migrated always
+                    // pushes its (scroll-derived) page so its position isn't lost.
+                    if !was_legacy && device_ms > computer_ms {
+                        // Device is newer → pull the page. On restore the viewer
+                        // drops to the top of that page.
+                        if doc.page != Some(device_page) {
+                            doc.page = Some(device_page);
+                            doc.modified = device_ms / 1000;
+                            changed = true;
+                            pulled += 1;
+                        }
+                    } else {
+                        // Computer wins → push the page to the device.
+                        if device_page != computer_page {
+                            rm::set_position(&host, &u, computer_page)?;
+                            pushed += 1;
+                        }
+                        if doc.page != Some(computer_page) {
+                            doc.page = Some(computer_page);
+                            changed = true;
+                        }
+                        if was_legacy {
+                            doc.modified = rm::now_secs();
+                            changed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        if uploaded > 0 || pushed > 0 {
+            device_changed = true;
+        }
+        if changed {
+            if let Err(e) = save_session(name, &session) {
+                eprintln!("  warning: could not update session '{name}': {e}");
+            }
+        }
+        println!(
+            "  {name}: uploaded {uploaded}, existing {existing}, pushed {pushed}, pulled {pulled}"
+        );
+    }
+
+    if device_changed {
+        println!("Refreshing reMarkable (the screen will blank briefly)...");
+        rm::restart_xochitl(&host)?;
+    }
+    Ok(())
+}
+
 /// Ask the terminal to delete all kitty images and free their data.
 /// Stripe protocols transmit image data once and never delete it, so protocols
 /// dropped on document switches and previews leak terminal memory until kitty
@@ -447,6 +726,9 @@ struct OpenDoc {
     path: String,
     scroll: usize,
     zoom: f32,
+    page: Option<usize>,
+    modified: i64,
+    remarkable_uuid: Option<String>,
 }
 
 fn print_help() {
@@ -462,6 +744,8 @@ OPTIONS:
     -h, --help                  Show this help message
     --session <name>            Restore a saved session by name
     --list-sessions             List all saved sessions
+    --sync-sessions [name...]   Sync all sessions (or only the named ones) to/from
+                                a connected reMarkable
     --zotero                    Browse Zotero library and open a PDF
     --setup-zotero <dir>        Configure Zotero data directory (one-time)
     --move-sessions <dir>       Move session storage to a custom directory
@@ -502,7 +786,7 @@ fn print_completions_bash() {
     COMPREPLY=()
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
-    opts="--help --session --list-sessions --zotero --setup-zotero --move-sessions --forward --completions"
+    opts="--help --session --list-sessions --sync-sessions --zotero --setup-zotero --move-sessions --forward --completions"
 
     case "$prev" in
         --session)
@@ -535,6 +819,7 @@ fn print_completions_fish() {
     print!(r#"complete -c tui-pdf -l help -s h -d 'Show help message'
 complete -c tui-pdf -l session -x -d 'Restore a saved session' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
 complete -c tui-pdf -l list-sessions -d 'List all saved sessions'
+complete -c tui-pdf -l sync-sessions -d 'Sync all sessions to/from a connected reMarkable'
 complete -c tui-pdf -l zotero -d 'Browse Zotero library'
 complete -c tui-pdf -l setup-zotero -r -F -d 'Configure Zotero data directory'
 complete -c tui-pdf -l move-sessions -r -F -d 'Move session storage directory'
@@ -553,6 +838,7 @@ _tui-pdf() {{
         '(-h --help)'{{'{{-h,--help}}'}}'[Show help message]' \
         '--session[Restore a saved session]:session name:->sessions' \
         '--list-sessions[List all saved sessions]' \
+        '--sync-sessions[Sync all sessions to/from a connected reMarkable]' \
         '--zotero[Browse Zotero library]' \
         '--setup-zotero[Configure Zotero data directory]:directory:_directories' \
         '--move-sessions[Move session storage directory]:directory:_directories' \
@@ -682,6 +968,19 @@ fn main() -> io::Result<()> {
         }
     }
 
+    // Handle --sync-sessions [name...]: sync all saved sessions, or only the
+    // named ones if any are listed, to/from the reMarkable.
+    if args[1] == "--sync-sessions" {
+        let only: Vec<String> = args[2..].to_vec();
+        match sync_sessions(&only) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("sync failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     // Handle --zotero: browse Zotero library and open selected PDF
     if args.len() >= 2 && args[1] == "--zotero" {
         let config = load_config();
@@ -722,12 +1021,18 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             path: d.path.clone(),
             scroll: d.scroll,
             zoom: d.zoom,
+            page: d.page,
+            modified: d.modified,
+            remarkable_uuid: d.remarkable_uuid.clone(),
         }).collect()
     } else {
         pdf_paths.iter().map(|p| OpenDoc {
             path: p.to_string(),
             scroll: 0,
             zoom: 1.0,
+            page: None,
+            modified: 0,
+            remarkable_uuid: None,
         }).collect()
     };
     let mut current_idx: usize = session.map_or(0, |s| s.current.min(open_docs.len().saturating_sub(1)));
@@ -768,12 +1073,16 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     path: current_path.clone(),
                     scroll: 0,
                     zoom: 1.0,
+                    page: None,
+                    modified: 0,
+                    remarkable_uuid: None,
                 });
                 open_docs.len() - 1
             }
         };
         let saved_scroll = open_docs[current_idx].scroll;
         let saved_zoom = open_docs[current_idx].zoom;
+        let saved_page = open_docs[current_idx].page;
 
         // Try to open content source (URL or PDF file)
         let open_result = if is_url(&current_path) {
@@ -887,6 +1196,14 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         if inverted { pdf_state.toggle_invert(&source); }
         let _ = pdf_state.initial_render(&source);
         pdf_state.global_scroll = saved_scroll;
+        // If a sync pulled a newer page from the device, the stored page won't
+        // match the (stale) scroll offset — honor the page in that case.
+        // Normal restores keep the precise sub-page scroll.
+        if let Some(p) = saved_page {
+            if p < pdf_state.page_count() && pdf_state.current_page() != p {
+                pdf_state.go_to_page(p);
+            }
+        }
 
         let outlines = source.outlines();
         let mut toc_state = TocState::new(&outlines);
@@ -930,6 +1247,11 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         }
 
         // Save state before switching
+        let page_now = pdf_state.current_page();
+        if open_docs[current_idx].page != Some(page_now) {
+            open_docs[current_idx].modified = tui_pdf::remarkable::now_secs();
+        }
+        open_docs[current_idx].page = Some(page_now);
         open_docs[current_idx].scroll = pdf_state.global_scroll;
         open_docs[current_idx].zoom = pdf_state.zoom;
         inverted = pdf_state.inverted();
