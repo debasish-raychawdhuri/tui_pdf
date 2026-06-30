@@ -361,6 +361,49 @@ fn send_to_remarkable(path: &str) -> io::Result<String> {
     }
 }
 
+/// Upload a single PDF to the device's `tui-pdf` folder over SSH (Developer
+/// Mode). Named by Zotero title, opened at `page`, deduped by name, and the
+/// device is refreshed so it appears. Errors if SSH isn't reachable.
+fn send_to_remarkable_ssh(
+    host: &str,
+    path: &str,
+    page: usize,
+    zotero_dir: Option<&str>,
+) -> io::Result<String> {
+    use tui_pdf::remarkable as rm;
+    rm::preflight(host)?;
+    let mut index = rm::read_index(host)?;
+    let root = ensure_collection(host, &mut index, "tui-pdf", "")?;
+    let dev_name = device_display_name(path, zotero_dir);
+    if index
+        .iter()
+        .any(|it| !it.is_collection && it.parent == root && it.visible_name == dev_name)
+    {
+        return Ok(format!("'{}' already on reMarkable", dev_name));
+    }
+    let page_count = Document::open(path)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("open PDF: {e}")))?
+        .page_count();
+    let page = page.min(page_count.saturating_sub(1));
+    rm::upload_pdf(host, path, &dev_name, &root, page_count, page)?;
+    rm::restart_xochitl(host)?;
+    Ok(format!("Sent '{}' to reMarkable", dev_name))
+}
+
+/// Send the current PDF to the reMarkable, preferring SSH (Developer Mode) and
+/// falling back to the USB web interface for devices not in Developer Mode.
+fn send_one_to_remarkable(path: &str, page: usize, zotero_dir: Option<&str>) -> io::Result<String> {
+    if !std::path::Path::new(path).exists() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "file not found"));
+    }
+    let host = load_config().remarkable_host();
+    if tui_pdf::remarkable::preflight(&host).is_ok() {
+        send_to_remarkable_ssh(&host, path, page, zotero_dir)
+    } else {
+        send_to_remarkable(path)
+    }
+}
+
 /// Display name for a document on the device: the Zotero title if the file is a
 /// Zotero attachment, otherwise the file stem. Sanitized for use as a name.
 fn device_display_name(path: &str, zotero_dir: Option<&str>) -> String {
@@ -769,7 +812,8 @@ KEYBINDINGS:
     s                           SyncTeX probe (keyboard reverse search)
     o                           Open Zotero browser
     O                           Open latest Zotero PDF
-    R                           Send PDF to reMarkable via USB
+    R                           Send PDF to reMarkable over USB (SSH in Developer
+                                Mode, else the USB web interface)
     C                           Send PDF to reMarkable cloud (rmapi)
     S                           Save session (prompts for name first time)
     d                           Document picker
@@ -805,6 +849,14 @@ fn print_completions_bash() {
             ;;
     esac
 
+    # --sync-sessions takes one or more session names
+    if [[ " ${{COMP_WORDS[*]}} " == *" --sync-sessions "* && "$cur" != -* ]]; then
+        local sessions
+        sessions=$(tui-pdf --list-sessions 2>/dev/null | grep '^ ' | sed 's/^ *//' | cut -d' ' -f1)
+        COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
+        return 0
+    fi
+
     if [[ "$cur" == -* ]]; then
         COMPREPLY=( $(compgen -W "$opts" -- "$cur") )
     else
@@ -820,6 +872,7 @@ fn print_completions_fish() {
 complete -c tui-pdf -l session -x -d 'Restore a saved session' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
 complete -c tui-pdf -l list-sessions -d 'List all saved sessions'
 complete -c tui-pdf -l sync-sessions -d 'Sync all sessions to/from a connected reMarkable'
+complete -c tui-pdf -n '__fish_seen_argument -l sync-sessions' -d 'Session to sync' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
 complete -c tui-pdf -l zotero -d 'Browse Zotero library'
 complete -c tui-pdf -l setup-zotero -r -F -d 'Configure Zotero data directory'
 complete -c tui-pdf -l move-sessions -r -F -d 'Move session storage directory'
@@ -838,7 +891,7 @@ _tui-pdf() {{
         '(-h --help)'{{'{{-h,--help}}'}}'[Show help message]' \
         '--session[Restore a saved session]:session name:->sessions' \
         '--list-sessions[List all saved sessions]' \
-        '--sync-sessions[Sync all sessions to/from a connected reMarkable]' \
+        '--sync-sessions[Sync all sessions to/from a connected reMarkable]:*:session name:->sessions' \
         '--zotero[Browse Zotero library]' \
         '--setup-zotero[Configure Zotero data directory]:directory:_directories' \
         '--move-sessions[Move session storage directory]:directory:_directories' \
@@ -2016,7 +2069,7 @@ fn run_app(
                         KeyCode::Char('R') => {
                             if !is_url(&source.path_or_url()) {
                                 let path = source.path_or_url().to_string();
-                                match send_to_remarkable(&path) {
+                                match send_one_to_remarkable(&path, pdf_state.current_page(), zotero_dir.as_deref()) {
                                     Ok(_) => {
                                         let name = std::path::Path::new(&path)
                                             .file_name()
