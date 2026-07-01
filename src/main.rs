@@ -206,6 +206,7 @@ fn build_session(open_docs: &[OpenDoc], current_idx: usize, pdf_state: &PdfViewS
                 page,
                 modified,
                 remarkable_uuid: d.remarkable_uuid.clone(),
+                render_path: d.render_path.clone(),
             }
         }).collect(),
         current: current_idx,
@@ -538,16 +539,14 @@ fn pull_and_store_annotations(
     device_last_modified_ms: i64,
     source: &ContentSource,
     device_width: f32,
-) -> io::Result<Option<usize>> {
+    device_height: f32,
+) -> io::Result<(Option<usize>, Option<String>)> {
     use tui_pdf::remarkable as rm;
     use tui_pdf::rm_lines;
 
-    // Read `.content` to map each page-uuid -> original PDF page.
     let content_text = rm::rm_read_file(host, &format!("{}/{}.content", rm::XOCHITL_DIR, uuid))?;
     let content: serde_json::Value = serde_json::from_str(content_text.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad .content: {e}")))?;
-    // Notebooks have no PDF backing: a `.rm` page overlays the blank page at its
-    // ordinal position. PDFs map via `redir` to the original page.
     let is_notebook = content.get("fileType").and_then(|v| v.as_str()) == Some("notebook");
     let page_list = content_pages(&content);
     let device_page_count = content
@@ -556,23 +555,44 @@ fn pull_and_store_annotations(
         .map(|n| n as usize)
         .or(if page_list.is_empty() { None } else { Some(page_list.len()) });
 
-    // Skip if our stored copy is already current.
+    // Ordinals with no PDF backing (inserted blank pages). A PDF with inserted
+    // pages is rendered from a *merged* backing PDF (original pages + blanks) so
+    // the notes appear in position; annotations then map by ordinal. Notebooks
+    // already have a blank backing PDF from the caller.
+    let inserted: Vec<usize> = page_list
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, r))| r.is_none())
+        .map(|(i, _)| i)
+        .collect();
+    let merge = !is_notebook && !inserted.is_empty();
+    let merged_path = tui_pdf::config::notebooks_dir().join(uuid).join("merged.pdf");
+    let render_path = if merge {
+        Some(merged_path.to_string_lossy().to_string())
+    } else {
+        None
+    };
+
+    // Skip re-pulling if our stored copy is current (still report render_path so
+    // the caller keeps pointing at the merged PDF).
     if device_last_modified_ms > 0 {
         if let Some(existing) = rm_lines::load(uuid) {
-            if existing.last_modified_ms >= device_last_modified_ms {
-                return Ok(device_page_count);
+            if existing.last_modified_ms >= device_last_modified_ms && (!merge || merged_path.exists())
+            {
+                return Ok((device_page_count, render_path));
             }
         }
     }
 
-    // Pull the `<uuid>/` directory of `.rm` files into a temp dir (scp -r drops
-    // them under `<tmp>/<uuid>/`).
+    // Pull the `<uuid>/` directory of `.rm` files (scp -r drops them under
+    // `<tmp>/<uuid>/`).
     let tmp = std::env::temp_dir().join(format!("tui-pdf-rm-{uuid}"));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp)?;
     rm::rm_scp_from(host, &format!("{}/{}", rm::XOCHITL_DIR, uuid), &tmp.to_string_lossy())?;
 
     let rm_dir = tmp.join(uuid);
+    let orig_page_count = source.page_count();
     let mut raw_strokes: Vec<tui_pdf::rm_lines::RawPageStroke> = Vec::new();
     if let Ok(entries) = fs::read_dir(&rm_dir) {
         for entry in entries.flatten() {
@@ -580,28 +600,22 @@ fn pull_and_store_annotations(
             if path.extension().and_then(|e| e.to_str()) != Some("rm") {
                 continue; // skip per-page -metadata.json etc.
             }
-            let page_uuid = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("")
-                .to_string();
+            let page_uuid = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
             let dev_idx = match page_list.iter().position(|(id, _)| id == &page_uuid) {
                 Some(i) => i,
                 None => continue,
             };
-            // Notebook: overlay at the page's ordinal position. PDF: map via
-            // `redir` to the original page; `None` = inserted blank page (skip).
-            let pdf_page = if is_notebook {
-                dev_idx
+            // Target page in the RENDERED doc, and whether that page is blank.
+            let (target_page, page_backing_less) = if is_notebook {
+                (dev_idx, true)
+            } else if merge {
+                (dev_idx, page_list[dev_idx].1.is_none())
             } else {
                 match page_list[dev_idx].1 {
-                    Some(n) if n >= 0 => n as usize,
+                    Some(n) if (n as usize) < orig_page_count => (n as usize, false),
                     _ => continue,
                 }
             };
-            if pdf_page >= source.page_count() {
-                continue;
-            }
             let bytes = match fs::read(&path) {
                 Ok(b) => b,
                 Err(_) => continue,
@@ -615,11 +629,12 @@ fn pull_and_store_annotations(
                     continue;
                 }
                 raw_strokes.push(tui_pdf::rm_lines::RawPageStroke {
-                    page: pdf_page,
+                    page: target_page,
                     pts: s.pts,
                     color_id: s.color_id,
                     tool_id: s.tool_id,
                     thickness: s.thickness,
+                    backing_less: page_backing_less,
                 });
             }
         }
@@ -628,12 +643,32 @@ fn pull_and_store_annotations(
     let ann = rm_lines::DocAnnotations {
         last_modified_ms: device_last_modified_ms,
         device_width,
-        backing_less: is_notebook,
         raw: raw_strokes,
     };
     rm_lines::save(uuid, &ann)?;
+
+    // Build the merged backing PDF (original pages + blank inserts).
+    if merge {
+        let orig = source.path_or_url().to_string();
+        if let Ok(orig_bytes) = fs::read(&orig) {
+            let (w_pt, h_pt) = (
+                device_width * 72.0 / NOTEBOOK_DPI,
+                device_height * 72.0 / NOTEBOOK_DPI,
+            );
+            match rm_lines::build_merged_pdf(&orig_bytes, &inserted, w_pt, h_pt) {
+                Ok(bytes) => {
+                    if let Some(parent) = merged_path.parent() {
+                        let _ = fs::create_dir_all(parent);
+                    }
+                    let _ = fs::write(&merged_path, bytes);
+                }
+                Err(e) => eprintln!("  warning: merge failed for {uuid}: {e}"),
+            }
+        }
+    }
+
     let _ = fs::remove_dir_all(&tmp);
-    Ok(device_page_count)
+    Ok((device_page_count, render_path))
 }
 
 /// Assumed device DPI when sizing a notebook's blank backing page. The absolute
@@ -711,6 +746,7 @@ fn pull_notebooks_in_folder(
                     item.last_modified_ms,
                     &src,
                     device_width,
+                    device_height,
                 );
             }
         }
@@ -722,6 +758,7 @@ fn pull_notebooks_in_folder(
             page: Some(item.last_opened_page.max(0) as usize),
             modified: item.activity_ms / 1000,
             remarkable_uuid: Some(item.uuid.clone()),
+            render_path: None, // a notebook's blank PDF *is* its `path`
         });
         added += 1;
     }
@@ -901,9 +938,19 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
                     // Scribbles: the reMarkable is authoritative. Pull them down
                     // (read-only on the device) when the doc carries annotations.
                     if annotated.contains(&u) {
-                        match pull_and_store_annotations(&host, &u, item.last_modified_ms, &source, device_width) {
-                            Ok(dev_pages) => {
+                        match pull_and_store_annotations(
+                            &host, &u, item.last_modified_ms, &source, device_width, device_height,
+                        ) {
+                            Ok((dev_pages, render_path)) => {
                                 pulled_ann += 1;
+                                // A PDF with inserted pages is displayed from a
+                                // merged backing PDF; keep the original as `path`
+                                // (sync source of truth) and point the viewer at
+                                // the merged copy via `render_path`.
+                                if doc.render_path != render_path {
+                                    doc.render_path = render_path;
+                                    changed = true;
+                                }
                                 // Edge case: if the page we were on was deleted on
                                 // the tablet, fall back to the device's position.
                                 if let Some(dpc) = dev_pages {
@@ -1063,6 +1110,8 @@ struct OpenDoc {
     page: Option<usize>,
     modified: i64,
     remarkable_uuid: Option<String>,
+    /// View-only backing PDF (merged / notebook blank) if one was generated.
+    render_path: Option<String>,
 }
 
 fn print_help() {
@@ -1397,6 +1446,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             page: d.page,
             modified: d.modified,
             remarkable_uuid: d.remarkable_uuid.clone(),
+            render_path: d.render_path.clone(),
         }).collect()
     } else {
         pdf_paths.iter().map(|p| OpenDoc {
@@ -1406,6 +1456,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             page: None,
             modified: 0,
             remarkable_uuid: None,
+            render_path: None,
         }).collect()
     };
     let mut current_idx: usize = session.map_or(0, |s| s.current.min(open_docs.len().saturating_sub(1)));
@@ -1449,6 +1500,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     page: None,
                     modified: 0,
                     remarkable_uuid: None,
+                    render_path: None,
                 });
                 open_docs.len() - 1
             }
@@ -1456,6 +1508,15 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
         let saved_scroll = open_docs[current_idx].scroll;
         let saved_zoom = open_docs[current_idx].zoom;
         let saved_page = open_docs[current_idx].page;
+
+        // Display the locally-generated backing PDF (merged pages / notebook
+        // blanks) when one exists; fall back to the original path otherwise.
+        let view_path = open_docs[current_idx]
+            .render_path
+            .as_deref()
+            .filter(|p| std::path::Path::new(p).exists())
+            .unwrap_or(&current_path)
+            .to_string();
 
         // Try to open content source (URL or PDF file)
         let open_result = if is_url(&current_path) {
@@ -1467,7 +1528,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             });
             capture_url(&current_path).map(ContentSource::Web)
         } else {
-            Document::open(&current_path).map(ContentSource::Pdf)
+            Document::open(&view_path).map(ContentSource::Pdf)
         };
 
         let mut source = match open_result {

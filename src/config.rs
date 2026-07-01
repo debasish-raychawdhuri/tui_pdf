@@ -32,6 +32,11 @@ pub struct SessionDoc {
     /// reMarkable document UUID assigned on first sync; the dedup key.
     #[serde(default)]
     pub remarkable_uuid: Option<String>,
+    /// Locally-generated backing PDF to display instead of `path` — a merged
+    /// PDF (original pages + blank inserted pages) or a notebook's blank pages.
+    /// `path` stays the sync source of truth; this is view-only.
+    #[serde(default)]
+    pub render_path: Option<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
@@ -207,6 +212,7 @@ pub fn load_session(name: &str) -> Option<Session> {
     let zotero_dir = config.zotero_dir.as_deref();
     for doc in &mut session.docs {
         doc.path = from_portable_path(&doc.path, zotero_dir);
+        doc.render_path = doc.render_path.as_ref().map(|p| from_portable_path(p, zotero_dir));
     }
     Some(session)
 }
@@ -225,6 +231,7 @@ pub fn save_session(name: &str, session: &Session) -> io::Result<()> {
             page: d.page,
             modified: d.modified,
             remarkable_uuid: d.remarkable_uuid.clone(),
+            render_path: d.render_path.as_ref().map(|p| to_portable_path(p, zotero_dir)),
         }).collect(),
         current: session.current,
     };

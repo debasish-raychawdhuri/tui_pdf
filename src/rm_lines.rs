@@ -39,13 +39,17 @@ pub struct Stroke {
 /// width is ever wrong it's a one-number fix with no re-sync.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawPageStroke {
-    /// 0-based original PDF page this stroke overlays.
+    /// 0-based page (in the rendered document) this stroke overlays.
     pub page: usize,
     /// Polyline vertices in reMarkable canvas px (x centered, y from the top).
     pub pts: Vec<(f32, f32)>,
     pub color_id: u32,
     pub tool_id: u32,
     pub thickness: f32,
+    /// True if this page has no PDF backing (notebook / inserted page) → the
+    /// strokes are fit to their bounding box rather than registered fit-to-width.
+    #[serde(default)]
+    pub backing_less: bool,
 }
 
 /// All annotations pulled from one device document, keyed on disk by its
@@ -59,13 +63,9 @@ pub struct DocAnnotations {
     /// stores strokes in this pixel space and fits PDFs to it; the transform
     /// needs it and it differs by model, so we record what the device reported.
     pub device_width: f32,
-    /// True for pages with no PDF backing (notebooks, inserted pages). These are
-    /// written with arbitrary pan/zoom, so there is no fixed canvas frame — we
-    /// fit each page's strokes to their own bounding box. False for annotations
-    /// registered over a real PDF page (fit-to-width keeps them aligned).
-    #[serde(default)]
-    pub backing_less: bool,
-    /// Strokes in canvas coordinates, page already resolved.
+    /// Strokes in canvas coordinates, page already resolved. Each stroke carries
+    /// its own `backing_less` flag (a merged document mixes PDF-backed pages and
+    /// blank inserted pages).
     pub raw: Vec<RawPageStroke>,
 }
 
@@ -100,7 +100,8 @@ impl DocAnnotations {
             // Choose the transform: bounding-box fit for backing-less pages
             // (pan/zoom means no fixed frame), fit-to-width for PDF-registered
             // annotations. Both are `pt = raw * k + off`.
-            let (kx, ky, ox, oy) = if self.backing_less {
+            let backing_less = strokes.first().map(|s| s.backing_less).unwrap_or(false);
+            let (kx, ky, ox, oy) = if backing_less {
                 let (mut xmin, mut xmax, mut ymin, mut ymax) =
                     (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
                 for s in &strokes {
@@ -166,6 +167,36 @@ pub fn write_blank_pdf(
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(path, bytes)
+}
+
+/// Rebuild a PDF to mirror the reMarkable's page sequence: the original PDF
+/// pages with blank pages inserted at `inserted_ordinals` (the positions where
+/// the tablet has pages with no PDF backing). Returns the merged PDF bytes.
+/// Assumes the backing pages keep their original order (the normal case).
+pub fn build_merged_pdf(
+    orig_pdf_bytes: &[u8],
+    inserted_ordinals: &[usize],
+    blank_w_pt: f32,
+    blank_h_pt: f32,
+) -> io::Result<Vec<u8>> {
+    use mupdf::pdf::PdfDocument;
+    use std::io::Write as _;
+
+    let mut doc = PdfDocument::from_bytes(orig_pdf_bytes)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("open pdf: {e}")))?;
+    let mut ords: Vec<usize> = inserted_ordinals.to_vec();
+    ords.sort_unstable();
+    // Insert ascending: when we reach ordinal N, positions 0..N are already
+    // filled (original pages + earlier inserts), so N is the correct index.
+    for ord in ords {
+        doc.new_page_at(ord as i32, (blank_w_pt, blank_h_pt))
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("insert page: {e}")))?;
+    }
+    let mut out = Vec::new();
+    doc.write_to(&mut out)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("write pdf: {e}")))?;
+    let _ = out.flush();
+    Ok(out)
 }
 
 /// Path to the stored annotations for a device document UUID.
