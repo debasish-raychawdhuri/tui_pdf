@@ -27,7 +27,7 @@ A fast, feature-rich PDF and Markdown viewer for the terminal. Renders PDF pages
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
 - **Portable sessions** — Zotero PDF paths are stored as portable `zotero://` URIs, so sessions synced via cloud storage work across computers
-- **reMarkable integration** — send the current PDF to a reMarkable tablet over SSH in Developer Mode, opened at your current page (`R`; falls back to the USB web interface for non-developer devices), or to the reMarkable cloud via [rmapi](https://github.com/ddvk/rmapi) (`C`). Bidirectionally sync every saved session's documents and reading positions with the tablet via `tui-pdf --sync-sessions`
+- **reMarkable integration** — send the current PDF to a reMarkable tablet over SSH in Developer Mode, opened at your current page (`R`; falls back to the USB web interface for non-developer devices), or to the reMarkable cloud via [rmapi](https://github.com/ddvk/rmapi) (`C`). Bidirectionally sync every saved session's documents and reading positions with the tablet via `tui-pdf --sync-sessions`, which also pulls your handwritten annotations back and draws them over the PDF (`a` to toggle)
 - **Shell completions** — tab completion for bash, fish, and zsh
 
 ## Requirements
@@ -170,6 +170,7 @@ tui-pdf --completions zsh
 | `b` | Go back (after following a link) |
 | `w` | Fit to width |
 | `i` | Toggle color inversion |
+| `a` | Toggle reMarkable annotation overlay (when the doc has pulled scribbles) |
 | `m` | Show Zotero metadata for current document |
 | `c` (in metadata view) | Copy BibTeX to clipboard |
 | `u` (in metadata view) | Open the document's URL (or DOI) in a browser |
@@ -251,6 +252,8 @@ ssh-copy-id root@10.11.99.1
 **Send a single PDF (`R`):** the current document is uploaded into a `tui-pdf` folder on the tablet, named by its Zotero title (when known) and opened at your current page. Documents are de-duplicated by name, so re-sending is a no-op. If SSH isn't reachable (device not in Developer Mode), it falls back to the USB web interface. `C` sends to the reMarkable cloud instead, via [rmapi](https://github.com/ddvk/rmapi).
 
 **Sync whole sessions (`tui-pdf --sync-sessions`):** for each saved session (or only the ones you name), every document is pushed to the tablet and reading positions are reconciled **latest-wins** in both directions — so pages you turned on the reMarkable flow back into your session, and pages you moved on the computer flow to the tablet. Markdown documents are skipped (the tablet can't open them natively). The tablet's UI refreshes once at the end.
+
+**Pull scribbles back:** `--sync-sessions` also pulls handwritten annotations *down* from the tablet (the reMarkable is authoritative for scribbles — pulling is read-only on the device). The device stores strokes as separate v6 `.rm` files, not inside the PDF; tui-pdf parses them, converts them to vector overlays, and stores them under `~/.config/tui-pdf/annotations/`. When you open the document, your handwriting is drawn on top of the PDF. Toggle the overlay with `a`. Pages you *inserted* on the tablet (blank pages with no source page) aren't shown.
 
 Sync defaults to the USB address (`10.11.99.1`). To sync over WiFi, enable SSH-over-WLAN on the tablet (`rm-ssh-over-wlan on`) and pass its WiFi address with `--ip`:
 

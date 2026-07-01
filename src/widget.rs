@@ -132,6 +132,12 @@ pub struct PdfViewState {
 
     inverted: bool,
 
+    /// reMarkable pen strokes to overlay, grouped by page. Baked into the page
+    /// image before striping (they're static, unlike search highlights).
+    annotations: Option<HashMap<usize, Vec<crate::rm_lines::Stroke>>>,
+    /// Whether the annotation overlay is currently shown (toggled with `a`).
+    show_annotations: bool,
+
     /// Last render area for terminal-to-PDF coordinate conversion.
     pub last_render_area: Option<(u16, u16, u16, u16)>,
 
@@ -164,6 +170,8 @@ impl PdfViewState {
             prerender_queue: Vec::new(),
             prerender_pos: 0,
             inverted: false,
+            annotations: None,
+            show_annotations: true,
             last_render_area: None,
             probe_swapped: Vec::new(),
             render_cols: 0,
@@ -254,8 +262,16 @@ impl PdfViewState {
     }
 
     fn cache_key(&self) -> u32 {
-        let k = (self.zoom * 100.0) as u32;
-        if self.inverted { k | (1 << 31) } else { k }
+        let mut k = (self.zoom * 100.0) as u32;
+        if self.inverted {
+            k |= 1 << 31;
+        }
+        // Distinguish stripes rendered with the annotation overlay baked in, so
+        // that loading annotations after the first render rebuilds the stripes.
+        if self.show_annotations && self.annotations.is_some() {
+            k |= 1 << 30;
+        }
+        k
     }
 
     pub fn inverted(&self) -> bool {
@@ -266,6 +282,26 @@ impl PdfViewState {
         self.inverted = !self.inverted;
         self.last_link_overlay = None;
         self.last_search_overlay = None;
+        self.rendered_pages.clear();
+        self.dirty_highlight_stripes.clear();
+        let _ = self.initial_render(source);
+    }
+
+    /// Whether this document has any pulled reMarkable annotations.
+    pub fn has_annotations(&self) -> bool {
+        self.annotations.as_ref().is_some_and(|a| !a.is_empty())
+    }
+
+    /// Install reMarkable pen strokes (page -> strokes) to overlay on the PDF.
+    pub fn set_annotations(&mut self, ann: HashMap<usize, Vec<crate::rm_lines::Stroke>>) {
+        self.annotations = Some(ann);
+        self.rendered_pages.clear();
+        self.dirty_highlight_stripes.clear();
+    }
+
+    /// Toggle the annotation overlay on/off and re-render.
+    pub fn toggle_annotations(&mut self, source: &ContentSource) {
+        self.show_annotations = !self.show_annotations;
         self.rendered_pages.clear();
         self.dirty_highlight_stripes.clear();
         let _ = self.initial_render(source);
@@ -505,6 +541,29 @@ impl PdfViewState {
     /// Render one page from the pre-render queue into stripe PNG cache.
     /// Does NOT build protocols — those are built on-demand in update_image.
     /// Returns true if there is more work to do.
+    /// Render one page to cached stripe PNGs: rasterize via MuPDF, invert for
+    /// dark mode, bake in the reMarkable annotation overlay (after invert, so
+    /// stroke colours survive), then split into stripes and PNG-encode. This is
+    /// the single raster path shared by initial/idle/on-demand rendering.
+    fn build_page_stripes(
+        &self,
+        source: &ContentSource,
+        page_idx: usize,
+        font_height: u32,
+    ) -> Result<Vec<Vec<u8>>> {
+        let mut img = source.render_page_dpi(page_idx, self.zoom)?;
+        if self.inverted {
+            img.invert();
+        }
+        if self.show_annotations {
+            if let Some(strokes) = self.annotations.as_ref().and_then(|a| a.get(&page_idx)) {
+                img = crate::renderer::overlay_strokes(&img, self.zoom, strokes);
+            }
+        }
+        let stripe_images = split_into_stripes(&img, font_height);
+        Ok(stripe_images.iter().map(encode_png).collect())
+    }
+
     pub fn prerender_tick(&mut self, source: &ContentSource) -> bool {
         let cache_key = self.cache_key();
         let font_height = self.picker.font_size().height as u32;
@@ -517,12 +576,7 @@ impl PdfViewState {
 
         // Build stripe PNGs if not cached
         if self.cache.get(page_idx, cache_key).is_none() {
-            if let Ok(mut img) = source.render_page_dpi(page_idx, self.zoom) {
-                if self.inverted {
-                    img.invert();
-                }
-                let stripe_images = split_into_stripes(&img, font_height);
-                let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+            if let Ok(stripe_pngs) = self.build_page_stripes(source, page_idx, font_height) {
                 self.cache.insert(page_idx, cache_key, stripe_pngs);
             }
         }
@@ -558,12 +612,7 @@ impl PdfViewState {
         // Render current page and next page immediately (PNGs + protocols)
         for page_idx in current..(current + 2).min(self.page_count) {
             if self.cache.get(page_idx, cache_key).is_none() {
-                let mut img = source.render_page_dpi(page_idx, self.zoom)?;
-                if self.inverted {
-                    img.invert();
-                }
-                let stripe_images = split_into_stripes(&img, font_height);
-                let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+                let stripe_pngs = self.build_page_stripes(source, page_idx, font_height)?;
                 self.cache.insert(page_idx, cache_key, stripe_pngs);
             }
             if !self.rendered_pages.contains_key(&page_idx) {
@@ -595,12 +644,7 @@ impl PdfViewState {
         let mut refocus = false;
         for page_idx in current..(current + 2).min(self.page_count) {
             if self.cache.get(page_idx, cache_key).is_none() {
-                if let Ok(mut img) = source.render_page_dpi(page_idx, self.zoom) {
-                    if self.inverted {
-                        img.invert();
-                    }
-                    let stripe_images = split_into_stripes(&img, font_height);
-                    let stripe_pngs: Vec<Vec<u8>> = stripe_images.iter().map(encode_png).collect();
+                if let Ok(stripe_pngs) = self.build_page_stripes(source, page_idx, font_height) {
                     self.cache.insert(page_idx, cache_key, stripe_pngs);
                     refocus = true;
                 }

@@ -484,8 +484,119 @@ fn ensure_collection(
         is_collection: true,
         last_opened_page: 0,
         activity_ms: 0,
+        last_modified_ms: 0,
     });
     Ok(uuid)
+}
+
+/// Pull a device document's annotations (if newer than our stored copy), render
+/// their strokes into PDF-point coordinates, and store them locally keyed by
+/// `uuid`. Returns the device's page count (from `.content`) when known, so the
+/// caller can detect pages deleted on the tablet. Read-only on the device.
+fn pull_and_store_annotations(
+    host: &str,
+    uuid: &str,
+    device_last_modified_ms: i64,
+    source: &ContentSource,
+) -> io::Result<Option<usize>> {
+    use tui_pdf::remarkable as rm;
+    use tui_pdf::rm_lines;
+
+    // Read `.content` to map each page-uuid -> original PDF page.
+    let content_text = rm::rm_read_file(host, &format!("{}/{}.content", rm::XOCHITL_DIR, uuid))?;
+    let content: serde_json::Value = serde_json::from_str(content_text.trim())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad .content: {e}")))?;
+    let pages: Vec<String> = content
+        .get("pages")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let redirect: Vec<i64> = content
+        .get("redirectionPageMap")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().map(|v| v.as_i64().unwrap_or(-1)).collect())
+        .unwrap_or_default();
+    let device_page_count = content
+        .get("pageCount")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize)
+        .or(if pages.is_empty() { None } else { Some(pages.len()) });
+
+    // Skip if our stored copy is already current.
+    if device_last_modified_ms > 0 {
+        if let Some(existing) = rm_lines::load(uuid) {
+            if existing.last_modified_ms >= device_last_modified_ms {
+                return Ok(device_page_count);
+            }
+        }
+    }
+
+    // Pull the `<uuid>/` directory of `.rm` files into a temp dir (scp -r drops
+    // them under `<tmp>/<uuid>/`).
+    let tmp = std::env::temp_dir().join(format!("tui-pdf-rm-{uuid}"));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp)?;
+    rm::rm_scp_from(host, &format!("{}/{}", rm::XOCHITL_DIR, uuid), &tmp.to_string_lossy())?;
+
+    let rm_dir = tmp.join(uuid);
+    let device_width = rm::device_stroke_width(host);
+    let mut raw_strokes: Vec<tui_pdf::rm_lines::RawPageStroke> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&rm_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("rm") {
+                continue; // skip per-page -metadata.json etc.
+            }
+            let page_uuid = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_string();
+            let dev_idx = match pages.iter().position(|p| p == &page_uuid) {
+                Some(i) => i,
+                None => continue,
+            };
+            // device page -> original PDF page via redirectionPageMap; -1 marks
+            // an inserted blank page with no backing PDF page (skip it).
+            let pdf_page = match redirect.get(dev_idx) {
+                Some(&n) if n >= 0 => n as usize,
+                Some(_) => continue,
+                None => dev_idx,
+            };
+            if pdf_page >= source.page_count() {
+                continue;
+            }
+            let bytes = match fs::read(&path) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            let raw = match rm_lines::parse_rm_v6(&bytes) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for s in raw {
+                if s.pts.len() < 2 {
+                    continue;
+                }
+                raw_strokes.push(tui_pdf::rm_lines::RawPageStroke {
+                    page: pdf_page,
+                    pts: s.pts,
+                    color_id: s.color_id,
+                    tool_id: s.tool_id,
+                    thickness: s.thickness,
+                });
+            }
+        }
+    }
+
+    let ann = rm_lines::DocAnnotations {
+        last_modified_ms: device_last_modified_ms,
+        device_width,
+        raw: raw_strokes,
+    };
+    rm_lines::save(uuid, &ann)?;
+    let _ = fs::remove_dir_all(&tmp);
+    Ok(device_page_count)
 }
 
 /// Sync every saved session to/from the reMarkable over SSH. For each session:
@@ -534,6 +645,8 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
     // end (only if something changed) so new documents appear.
     let mut index = rm::read_index(&host)?;
     let mut device_changed = false;
+    // UUIDs that carry handwritten annotations (one round-trip for the store).
+    let annotated = rm::list_annotated_uuids(&host).unwrap_or_default();
 
     let root_uuid = ensure_collection(&host, &mut index, "tui-pdf", "")?;
 
@@ -545,6 +658,7 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
         let folder_uuid = ensure_collection(&host, &mut index, name, &root_uuid)?;
 
         let (mut uploaded, mut existing, mut pushed, mut pulled) = (0u32, 0u32, 0u32, 0u32);
+        let mut pulled_ann = 0u32;
         let mut changed = false;
 
         for doc in &mut session.docs {
@@ -608,6 +722,7 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
                         is_collection: false,
                         last_opened_page: computer_page as i64,
                         activity_ms: rm::now_ms(),
+                        last_modified_ms: rm::now_ms(),
                     });
                 }
                 Some(u) => {
@@ -650,6 +765,31 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
                             changed = true;
                         }
                     }
+
+                    // Scribbles: the reMarkable is authoritative. Pull them down
+                    // (read-only on the device) when the doc carries annotations.
+                    if annotated.contains(&u) {
+                        match pull_and_store_annotations(&host, &u, item.last_modified_ms, &source) {
+                            Ok(dev_pages) => {
+                                pulled_ann += 1;
+                                // Edge case: if the page we were on was deleted on
+                                // the tablet, fall back to the device's position.
+                                if let Some(dpc) = dev_pages {
+                                    if computer_page >= dpc && dpc > 0 {
+                                        let dp = device_page.min(dpc - 1);
+                                        if doc.page != Some(dp) {
+                                            doc.page = Some(dp);
+                                            doc.modified = rm::now_secs();
+                                            changed = true;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("  warning: annotation pull for '{name}' failed: {e}")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -663,7 +803,7 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
             }
         }
         println!(
-            "  {name}: uploaded {uploaded}, existing {existing}, pushed {pushed}, pulled {pulled}"
+            "  {name}: uploaded {uploaded}, existing {existing}, pushed {pushed}, pulled {pulled}, annotated {pulled_ann}"
         );
     }
 
@@ -812,6 +952,7 @@ KEYBINDINGS:
     l                           Enter link mode (j/k: select, Enter: follow)
     b                           Go back after following a link
     i                           Toggle color inversion
+    a                           Toggle reMarkable annotation overlay (if any)
     m                           Show Zotero metadata for current PDF
     s                           SyncTeX probe (keyboard reverse search)
     o                           Open Zotero browser
@@ -1276,6 +1417,18 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
 
         let mut pdf_state = PdfViewState::new(source.page_count(), picker);
         pdf_state.zoom = saved_zoom;
+        // Load any reMarkable scribbles pulled for this document (keyed by its
+        // device UUID) so the first render bakes them into the page.
+        if source.is_pdf() {
+            if let Some(uuid) = open_docs[current_idx].remarkable_uuid.as_deref() {
+                if let Some(ann) = tui_pdf::rm_lines::load(uuid) {
+                    // Transform canvas strokes to PDF points using each page's
+                    // real size (works for any page size / device).
+                    let map = ann.strokes_by_page(|p| source.page_size(p).ok());
+                    pdf_state.set_annotations(map);
+                }
+            }
+        }
         if inverted { pdf_state.toggle_invert(&source); }
         let _ = pdf_state.initial_render(&source);
         pdf_state.global_scroll = saved_scroll;
@@ -2254,6 +2407,11 @@ fn run_app(
                         KeyCode::Char('j') | KeyCode::Down => pdf_state.scroll_down(3),
                         KeyCode::Char('k') | KeyCode::Up => pdf_state.scroll_up(3),
                         KeyCode::Char('i') => pdf_state.toggle_invert(source),
+                        KeyCode::Char('a') => {
+                            if pdf_state.has_annotations() {
+                                pdf_state.toggle_annotations(source);
+                            }
+                        }
                         KeyCode::Char('+') | KeyCode::Char('=') => pdf_state.zoom_in(source),
                         KeyCode::Char('-') => pdf_state.zoom_out(source),
                         KeyCode::Char('w') => pdf_state.fit_width(source),

@@ -123,6 +123,73 @@ pub fn rm_scp_to(host: &str, local: &str, remote_path: &str) -> io::Result<()> {
     }
 }
 
+/// Copy a remote file or directory from the device to `local` with `scp -r`.
+/// The inverse of [`rm_scp_to`]; used to pull annotation `.rm` files down.
+pub fn rm_scp_from(host: &str, remote_path: &str, local: &str) -> io::Result<()> {
+    let output = Command::new("scp")
+        .args(ssh_opts())
+        .arg("-r")
+        .arg(format!("{}:{}", target(host), remote_path))
+        .arg(local)
+        .output()
+        .map_err(|e| err(format!("failed to launch scp: {}", e)))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(err(format!(
+            "scp failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )))
+    }
+}
+
+/// The device's stroke-canvas width in px — the reference the annotation
+/// transform normalizes by. reMarkable stores strokes in framebuffer pixels and
+/// fits PDFs to this width; it differs by model (rM1/rM2 = 1404, Paper Pro is
+/// larger), so we ask the device rather than assume. Falls back to 1404.
+pub fn device_stroke_width(host: &str) -> f32 {
+    // rM1/rM2 expose the framebuffer as "<w>,<h>" (or "<w>x<h>").
+    if let Ok(out) = rm_run(host, "cat /sys/class/graphics/fb0/virtual_size 2>/dev/null") {
+        if let Some(w) = out.split(|c| c == ',' || c == 'x').next() {
+            if let Ok(n) = w.trim().parse::<f32>() {
+                if n > 0.0 {
+                    return n;
+                }
+            }
+        }
+    }
+    // Newer devices (Paper Pro) may not expose fb0 — fall back to model name.
+    let model = rm_run(
+        host,
+        "cat /sys/devices/soc0/machine 2>/dev/null; cat /proc/device-tree/model 2>/dev/null",
+    )
+    .unwrap_or_default()
+    .to_lowercase();
+    if model.contains("ferrari") || model.contains("pro") {
+        1620.0 // reMarkable Paper Pro
+    } else {
+        1404.0 // rM1 / rM2
+    }
+}
+
+/// UUIDs of documents that carry handwritten annotations, i.e. have a
+/// `<uuid>/` directory containing at least one `<page-uuid>.rm` file. One SSH
+/// round-trip for the whole store, so callers can cheaply test membership.
+pub fn list_annotated_uuids(host: &str) -> io::Result<std::collections::HashSet<String>> {
+    // For each subdirectory, emit its name if it holds any .rm file.
+    let cmd = format!(
+        "cd {dir} && for d in */; do u=${{d%/}}; \
+         if ls \"$d\"*.rm >/dev/null 2>&1; then echo \"$u\"; fi; done",
+        dir = XOCHITL_DIR
+    );
+    let out = rm_run(host, &cmd)?;
+    Ok(out
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
 /// Restart xochitl so it rescans the document store and shows newly added
 /// files. This briefly blanks the screen, so callers should do it once at the
 /// very end and only when something actually changed. We deliberately never
@@ -171,6 +238,9 @@ pub struct RmItem {
     pub last_opened_page: i64,
     /// Most recent activity (ms): `lastOpened`, falling back to `lastModified`.
     pub activity_ms: i64,
+    /// `lastModified` (ms), which bumps specifically when the document is edited
+    /// (annotated). Used to decide whether pulled annotations are stale.
+    pub last_modified_ms: i64,
 }
 
 /// Parse a ms-epoch field that may be a JSON string or number; 0 if absent/empty.
@@ -219,6 +289,7 @@ pub fn read_index(host: &str) -> io::Result<Vec<RmItem>> {
                 .and_then(|p| p.as_i64())
                 .unwrap_or(0),
             activity_ms: if last_opened > 0 { last_opened } else { last_modified },
+            last_modified_ms: last_modified,
         });
     }
     Ok(items)

@@ -154,6 +154,69 @@ pub fn overlay_highlights(img: &DynamicImage, zoom: f32, highlights: &[Highlight
     DynamicImage::ImageRgb8(rgb)
 }
 
+/// Draw reMarkable pen strokes onto a copy of the page image. Stroke points are
+/// in PDF points (top-left origin), scaled by `(DEFAULT_DPI/72)*zoom` — the same
+/// mapping [`overlay_highlights`] uses. Strokes are baked into the page before
+/// striping/caching (they're static, unlike search highlights).
+pub fn overlay_strokes(img: &DynamicImage, zoom: f32, strokes: &[crate::rm_lines::Stroke]) -> DynamicImage {
+    let mut rgb = img.to_rgb8();
+    let scale = (DEFAULT_DPI / 72.0) * zoom;
+    for s in strokes {
+        let r = (s.width_pt * scale / 2.0).max(0.5);
+        for w in s.pts.windows(2) {
+            let (x0, y0) = (w[0].0 * scale, w[0].1 * scale);
+            let (x1, y1) = (w[1].0 * scale, w[1].1 * scale);
+            draw_thick_segment(&mut rgb, x0, y0, x1, y1, r, s.color, s.alpha);
+        }
+    }
+    DynamicImage::ImageRgb8(rgb)
+}
+
+/// Stamp an alpha-blended, soft-edged disk of radius `r` at each step along the
+/// segment, giving a thick anti-aliased line with round caps/joins.
+fn draw_thick_segment(
+    img: &mut RgbImage,
+    x0: f32, y0: f32, x1: f32, y1: f32,
+    r: f32, color: [u8; 3], alpha: f32,
+) {
+    let dx = x1 - x0;
+    let dy = y1 - y0;
+    let len = (dx * dx + dy * dy).sqrt();
+    let steps = (len / 0.5).ceil().max(1.0) as usize;
+    for i in 0..=steps {
+        let t = i as f32 / steps as f32;
+        stamp_disk(img, x0 + dx * t, y0 + dy * t, r, color, alpha);
+    }
+}
+
+/// Alpha-blend a soft-edged filled disk centered at (cx, cy).
+fn stamp_disk(img: &mut RgbImage, cx: f32, cy: f32, r: f32, color: [u8; 3], alpha: f32) {
+    let (w, h) = (img.width() as i32, img.height() as i32);
+    let x_min = (cx - r - 1.0).floor().max(0.0) as i32;
+    let x_max = (cx + r + 1.0).ceil().min(w as f32) as i32;
+    let y_min = (cy - r - 1.0).floor().max(0.0) as i32;
+    let y_max = (cy + r + 1.0).ceil().min(h as f32) as i32;
+    for py in y_min..y_max {
+        for px in x_min..x_max {
+            let dist = (((px as f32 + 0.5) - cx).powi(2) + ((py as f32 + 0.5) - cy).powi(2)).sqrt();
+            // 1px soft edge for anti-aliasing.
+            let coverage = (r + 0.5 - dist).clamp(0.0, 1.0);
+            if coverage <= 0.0 {
+                continue;
+            }
+            let a = alpha * coverage;
+            let inv_a = 1.0 - a;
+            let pixel = img.get_pixel(px as u32, py as u32);
+            let blended = Rgb([
+                (pixel[0] as f32 * inv_a + color[0] as f32 * a) as u8,
+                (pixel[1] as f32 * inv_a + color[1] as f32 * a) as u8,
+                (pixel[2] as f32 * inv_a + color[2] as f32 * a) as u8,
+            ]);
+            img.put_pixel(px as u32, py as u32, blended);
+        }
+    }
+}
+
 /// Cache of stripe PNG bytes, keyed by (page_index, zoom_key).
 /// Evicts oldest entries (by insertion order) when total bytes exceed the limit.
 pub struct StripeCache {

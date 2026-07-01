@@ -63,6 +63,13 @@ fn sessions_dir() -> PathBuf {
     }
 }
 
+/// Directory holding pulled reMarkable annotations, one `<uuid>.json` per doc.
+/// Kept under the config dir (not the sessions dir) so it's independent of
+/// where sessions are stored / cloud-synced.
+pub fn annotations_dir() -> PathBuf {
+    config_dir().join("annotations")
+}
+
 pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
     let new_path = PathBuf::from(new_dir);
     fs::create_dir_all(&new_path)?;
