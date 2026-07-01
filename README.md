@@ -135,6 +135,9 @@ tui-pdf --list-sessions
 tui-pdf --sync-sessions
 tui-pdf --sync-sessions mysession othersession
 
+# Sync over WiFi instead of USB (needs SSH-over-WLAN enabled on the tablet):
+tui-pdf --sync-sessions --ip 192.168.1.42
+
 # Move session storage to a custom directory (e.g. for cloud sync):
 tui-pdf --move-sessions ~/MEGA/tui-pdf-sessions
 
@@ -248,6 +251,14 @@ ssh-copy-id root@10.11.99.1
 **Send a single PDF (`R`):** the current document is uploaded into a `tui-pdf` folder on the tablet, named by its Zotero title (when known) and opened at your current page. Documents are de-duplicated by name, so re-sending is a no-op. If SSH isn't reachable (device not in Developer Mode), it falls back to the USB web interface. `C` sends to the reMarkable cloud instead, via [rmapi](https://github.com/ddvk/rmapi).
 
 **Sync whole sessions (`tui-pdf --sync-sessions`):** for each saved session (or only the ones you name), every document is pushed to the tablet and reading positions are reconciled **latest-wins** in both directions — so pages you turned on the reMarkable flow back into your session, and pages you moved on the computer flow to the tablet. Markdown documents are skipped (the tablet can't open them natively). The tablet's UI refreshes once at the end.
+
+Sync defaults to the USB address (`10.11.99.1`). To sync over WiFi, enable SSH-over-WLAN on the tablet (`rm-ssh-over-wlan on`) and pass its WiFi address with `--ip`:
+
+```bash
+tui-pdf --sync-sessions --ip 192.168.1.42
+```
+
+`--ip` overrides `remarkable_host` from the config for that run; set `remarkable_host` in the config to make WiFi the default.
 
 > The reMarkable's `xochitl` service is never stopped mid-sync — sidecar files are written live and the service is restarted only once at the end, which briefly blanks the screen.
 

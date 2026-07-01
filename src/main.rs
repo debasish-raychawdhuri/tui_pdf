@@ -492,11 +492,13 @@ fn ensure_collection(
 /// create a `tui-pdf/<session>` folder, upload missing PDFs (named by Zotero
 /// title), never re-upload existing ones (annotation-safe), and reconcile the
 /// reading position with latest-time-wins.
-fn sync_sessions(only: &[String]) -> io::Result<()> {
+fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()> {
     use tui_pdf::remarkable as rm;
 
     let config = load_config();
-    let host = config.remarkable_host();
+    let host = host_override
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| config.remarkable_host());
     let zotero_dir = config.zotero_dir.clone();
 
     rm::preflight(&host)?;
@@ -787,8 +789,10 @@ OPTIONS:
     -h, --help                  Show this help message
     --session <name>            Restore a saved session by name
     --list-sessions             List all saved sessions
-    --sync-sessions [name...]   Sync all sessions (or only the named ones) to/from
-                                a connected reMarkable
+    --sync-sessions [--ip <addr>] [name...]
+                                Sync all sessions (or only the named ones) to/from
+                                a reMarkable. Defaults to USB (10.11.99.1); pass
+                                --ip <addr> to sync over WiFi
     --zotero                    Browse Zotero library and open a PDF
     --setup-zotero <dir>        Configure Zotero data directory (one-time)
     --move-sessions <dir>       Move session storage to a custom directory
@@ -1021,11 +1025,37 @@ fn main() -> io::Result<()> {
         }
     }
 
-    // Handle --sync-sessions [name...]: sync all saved sessions, or only the
-    // named ones if any are listed, to/from the reMarkable.
+    // Handle --sync-sessions [--ip <addr>] [name...]: sync all saved sessions,
+    // or only the named ones if any are listed, to/from the reMarkable. `--ip`
+    // overrides the SSH host (default `10.11.99.1`, the USB address) so the
+    // sync can run over WiFi.
     if args[1] == "--sync-sessions" {
-        let only: Vec<String> = args[2..].to_vec();
-        match sync_sessions(&only) {
+        let rest = &args[2..];
+        let mut host_override: Option<String> = None;
+        let mut only: Vec<String> = Vec::new();
+        let mut i = 0;
+        while i < rest.len() {
+            let a = &rest[i];
+            if a == "--ip" {
+                match rest.get(i + 1) {
+                    Some(addr) => {
+                        host_override = Some(addr.clone());
+                        i += 2;
+                    }
+                    None => {
+                        eprintln!("--ip requires an address, e.g. --ip 192.168.1.42");
+                        std::process::exit(1);
+                    }
+                }
+            } else if let Some(addr) = a.strip_prefix("--ip=") {
+                host_override = Some(addr.to_string());
+                i += 1;
+            } else {
+                only.push(a.clone());
+                i += 1;
+            }
+        }
+        match sync_sessions(&only, host_override.as_deref()) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("sync failed: {e}");
