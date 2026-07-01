@@ -70,6 +70,13 @@ pub fn annotations_dir() -> PathBuf {
     config_dir().join("annotations")
 }
 
+/// Directory holding blank backing PDFs generated for pulled reMarkable
+/// notebooks (which have no PDF of their own). One `<uuid>/<name>.pdf` per
+/// notebook; the strokes are drawn over it via the annotation overlay.
+pub fn notebooks_dir() -> PathBuf {
+    config_dir().join("notebooks")
+}
+
 pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
     let new_path = PathBuf::from(new_dir);
     fs::create_dir_all(&new_path)?;

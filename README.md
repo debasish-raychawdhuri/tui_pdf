@@ -255,6 +255,8 @@ ssh-copy-id root@10.11.99.1
 
 **Pull scribbles back:** `--sync-sessions` also pulls handwritten annotations *down* from the tablet (the reMarkable is authoritative for scribbles — pulling is read-only on the device). The device stores strokes as separate v6 `.rm` files, not inside the PDF; tui-pdf parses them, converts them to vector overlays, and stores them under `~/.config/tui-pdf/annotations/`. When you open the document, your handwriting is drawn on top of the PDF. Toggle the overlay with `a`. Pages you *inserted* on the tablet (blank pages with no source page) aren't shown.
 
+**Pull notebooks back:** notebooks and quick sheets you create *inside* a synced session's folder on the tablet are pulled too. Since a notebook has no PDF of its own, tui-pdf renders a blank backing page (sized to the device) and draws your strokes over it — so a reMarkable notebook opens and scrolls just like any other document, and is added to the session automatically. (The blank pages are generated per computer under `~/.config/tui-pdf/notebooks/`, so a session opened on a machine that hasn't synced yet won't have them until it does.)
+
 Sync defaults to the USB address (`10.11.99.1`). To sync over WiFi, enable SSH-over-WLAN on the tablet (`rm-ssh-over-wlan on`) and pass its WiFi address with `--ip`:
 
 ```bash

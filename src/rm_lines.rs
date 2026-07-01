@@ -111,6 +111,35 @@ impl DocAnnotations {
     }
 }
 
+/// Points per millimetre (printpdf works in mm).
+const PT_PER_MM: f32 = 72.0 / 25.4;
+
+/// Write a blank white PDF of `page_count` pages sized `w_pt` x `h_pt` (points).
+/// Used as the backing "page" for a pulled reMarkable notebook, which has no PDF
+/// of its own — its strokes are then drawn over it via the annotation overlay,
+/// so a notebook opens exactly like any other PDF (cf. how `.md` is rendered to
+/// a PDF and opened).
+pub fn write_blank_pdf(
+    path: &std::path::Path,
+    page_count: usize,
+    w_pt: f32,
+    h_pt: f32,
+) -> io::Result<()> {
+    use printpdf::{Mm, Op, PdfDocument, PdfPage, PdfSaveOptions};
+    let title = path.file_stem().and_then(|s| s.to_str()).unwrap_or("notebook");
+    let mut doc = PdfDocument::new(title);
+    let pages: Vec<PdfPage> = (0..page_count.max(1))
+        .map(|_| PdfPage::new(Mm(w_pt / PT_PER_MM), Mm(h_pt / PT_PER_MM), Vec::<Op>::new()))
+        .collect();
+    doc.with_pages(pages);
+    let mut warnings = Vec::new();
+    let bytes = doc.save(&PdfSaveOptions::default(), &mut warnings);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)
+}
+
 /// Path to the stored annotations for a device document UUID.
 pub fn annotations_path(uuid: &str) -> PathBuf {
     annotations_dir().join(format!("{uuid}.json"))
@@ -474,5 +503,19 @@ mod tests {
     #[test]
     fn rejects_non_v6() {
         assert!(parse_rm_v6(b"not a remarkable file").is_err());
+    }
+
+    #[test]
+    fn blank_notebook_pdf_opens() {
+        let dir = std::env::temp_dir().join("tui-pdf-test-nb");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("nb.pdf");
+        write_blank_pdf(&path, 3, 447.0, 596.0).expect("write blank pdf");
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes.starts_with(b"%PDF"));
+        // It must open as a real PDF with the requested page count.
+        let doc = crate::document::Document::open(&path).expect("open blank pdf");
+        assert_eq!(doc.page_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

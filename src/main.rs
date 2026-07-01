@@ -498,6 +498,7 @@ fn pull_and_store_annotations(
     uuid: &str,
     device_last_modified_ms: i64,
     source: &ContentSource,
+    device_width: f32,
 ) -> io::Result<Option<usize>> {
     use tui_pdf::remarkable as rm;
     use tui_pdf::rm_lines;
@@ -539,7 +540,6 @@ fn pull_and_store_annotations(
     rm::rm_scp_from(host, &format!("{}/{}", rm::XOCHITL_DIR, uuid), &tmp.to_string_lossy())?;
 
     let rm_dir = tmp.join(uuid);
-    let device_width = rm::device_stroke_width(host);
     let mut raw_strokes: Vec<tui_pdf::rm_lines::RawPageStroke> = Vec::new();
     if let Ok(entries) = fs::read_dir(&rm_dir) {
         for entry in entries.flatten() {
@@ -599,6 +599,98 @@ fn pull_and_store_annotations(
     Ok(device_page_count)
 }
 
+/// Assumed device DPI when sizing a notebook's blank backing page. The absolute
+/// size is arbitrary for a notebook (there's no "true" page); only the aspect
+/// (device w:h) matters, since strokes are placed proportionally.
+const NOTEBOOK_DPI: f32 = 226.0;
+
+/// Find notebooks/quick sheets in `folder_uuid` on the device that aren't yet in
+/// the session, render a blank backing PDF for each, pull their strokes, and add
+/// them to `session`. Returns how many were added. Read-only on the device.
+fn pull_notebooks_in_folder(
+    host: &str,
+    folder_uuid: &str,
+    index: &[tui_pdf::remarkable::RmItem],
+    annotated: &std::collections::HashSet<String>,
+    device_width: f32,
+    device_height: f32,
+    session: &mut Session,
+) -> u32 {
+    use tui_pdf::remarkable as rm;
+
+    let existing: std::collections::HashSet<String> = session
+        .docs
+        .iter()
+        .filter_map(|d| d.remarkable_uuid.clone())
+        .collect();
+
+    let mut added = 0u32;
+    for item in index.iter().filter(|it| {
+        !it.is_collection && it.parent == folder_uuid && !existing.contains(&it.uuid)
+    }) {
+        // Only notebooks (a device-added PDF is a separate feature).
+        let content_text =
+            match rm::rm_read_file(host, &format!("{}/{}.content", rm::XOCHITL_DIR, item.uuid)) {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+        let content: serde_json::Value = match serde_json::from_str(content_text.trim()) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if content.get("fileType").and_then(|v| v.as_str()) != Some("notebook") {
+            continue;
+        }
+        let page_count = content
+            .get("pageCount")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                content
+                    .get("pages")
+                    .and_then(|p| p.as_array())
+                    .map(|a| a.len() as u64)
+            })
+            .unwrap_or(1) as usize;
+
+        // Blank backing PDF, sized to the device page aspect.
+        let w_pt = device_width * 72.0 / NOTEBOOK_DPI;
+        let h_pt = device_height * 72.0 / NOTEBOOK_DPI;
+        let name = sanitize_name(&item.visible_name);
+        let name = if name.trim().is_empty() { "notebook".to_string() } else { name };
+        let pdf_path = tui_pdf::config::notebooks_dir()
+            .join(&item.uuid)
+            .join(format!("{name}.pdf"));
+        if let Err(e) = tui_pdf::rm_lines::write_blank_pdf(&pdf_path, page_count, w_pt, h_pt) {
+            eprintln!("  warning: could not create notebook '{}': {e}", item.visible_name);
+            continue;
+        }
+
+        // Pull its strokes (if any) so they show on first open.
+        if annotated.contains(&item.uuid) {
+            if let Ok(src) = Document::open(&pdf_path).map(ContentSource::Pdf) {
+                let _ = pull_and_store_annotations(
+                    host,
+                    &item.uuid,
+                    item.last_modified_ms,
+                    &src,
+                    device_width,
+                );
+            }
+        }
+
+        session.docs.push(tui_pdf::SessionDoc {
+            path: pdf_path.to_string_lossy().to_string(),
+            scroll: 0,
+            zoom: 1.0,
+            page: Some(item.last_opened_page.max(0) as usize),
+            modified: item.activity_ms / 1000,
+            remarkable_uuid: Some(item.uuid.clone()),
+        });
+        added += 1;
+    }
+    added
+}
+
 /// Sync every saved session to/from the reMarkable over SSH. For each session:
 /// create a `tui-pdf/<session>` folder, upload missing PDFs (named by Zotero
 /// title), never re-upload existing ones (annotation-safe), and reconcile the
@@ -647,6 +739,9 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
     let mut device_changed = false;
     // UUIDs that carry handwritten annotations (one round-trip for the store).
     let annotated = rm::list_annotated_uuids(&host).unwrap_or_default();
+    // Device stroke-canvas size, queried once (used for the annotation transform
+    // and for sizing generated notebook pages).
+    let (device_width, device_height) = rm::device_stroke_size(&host);
 
     let root_uuid = ensure_collection(&host, &mut index, "tui-pdf", "")?;
 
@@ -769,7 +864,7 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
                     // Scribbles: the reMarkable is authoritative. Pull them down
                     // (read-only on the device) when the doc carries annotations.
                     if annotated.contains(&u) {
-                        match pull_and_store_annotations(&host, &u, item.last_modified_ms, &source) {
+                        match pull_and_store_annotations(&host, &u, item.last_modified_ms, &source, device_width) {
                             Ok(dev_pages) => {
                                 pulled_ann += 1;
                                 // Edge case: if the page we were on was deleted on
@@ -794,6 +889,23 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
             }
         }
 
+        // Pull notebooks / quick sheets created directly in this session's folder
+        // on the device. They have no PDF of their own, so we render a blank
+        // backing PDF (like Markdown is rendered to a PDF) and add it to the
+        // session; the strokes overlay via the annotation path on open.
+        let notebooks_added = pull_notebooks_in_folder(
+            &host,
+            &folder_uuid,
+            &index,
+            &annotated,
+            device_width,
+            device_height,
+            &mut session,
+        );
+        if notebooks_added > 0 {
+            changed = true;
+        }
+
         if uploaded > 0 || pushed > 0 {
             device_changed = true;
         }
@@ -803,7 +915,7 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
             }
         }
         println!(
-            "  {name}: uploaded {uploaded}, existing {existing}, pushed {pushed}, pulled {pulled}, annotated {pulled_ann}"
+            "  {name}: uploaded {uploaded}, existing {existing}, pushed {pushed}, pulled {pulled}, annotated {pulled_ann}, notebooks {notebooks_added}"
         );
     }
 

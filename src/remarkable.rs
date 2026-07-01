@@ -143,17 +143,19 @@ pub fn rm_scp_from(host: &str, remote_path: &str, local: &str) -> io::Result<()>
     }
 }
 
-/// The device's stroke-canvas width in px — the reference the annotation
-/// transform normalizes by. reMarkable stores strokes in framebuffer pixels and
-/// fits PDFs to this width; it differs by model (rM1/rM2 = 1404, Paper Pro is
-/// larger), so we ask the device rather than assume. Falls back to 1404.
-pub fn device_stroke_width(host: &str) -> f32 {
+/// The device's stroke-canvas size in px `(width, height)` — the reference the
+/// annotation transform normalizes by, and the aspect for notebook pages.
+/// reMarkable stores strokes in framebuffer pixels and fits PDFs to this width;
+/// it differs by model (rM1/rM2 = 1404x1872, Paper Pro is larger), so we ask the
+/// device rather than assume. Falls back to 1404x1872.
+pub fn device_stroke_size(host: &str) -> (f32, f32) {
     // rM1/rM2 expose the framebuffer as "<w>,<h>" (or "<w>x<h>").
     if let Ok(out) = rm_run(host, "cat /sys/class/graphics/fb0/virtual_size 2>/dev/null") {
-        if let Some(w) = out.split(|c| c == ',' || c == 'x').next() {
-            if let Ok(n) = w.trim().parse::<f32>() {
-                if n > 0.0 {
-                    return n;
+        let mut it = out.split(|c| c == ',' || c == 'x');
+        if let (Some(w), Some(h)) = (it.next(), it.next()) {
+            if let (Ok(w), Ok(h)) = (w.trim().parse::<f32>(), h.trim().parse::<f32>()) {
+                if w > 0.0 && h > 0.0 {
+                    return (w, h);
                 }
             }
         }
@@ -166,10 +168,15 @@ pub fn device_stroke_width(host: &str) -> f32 {
     .unwrap_or_default()
     .to_lowercase();
     if model.contains("ferrari") || model.contains("pro") {
-        1620.0 // reMarkable Paper Pro
+        (1620.0, 2160.0) // reMarkable Paper Pro
     } else {
-        1404.0 // rM1 / rM2
+        (1404.0, 1872.0) // rM1 / rM2
     }
+}
+
+/// The device's stroke-canvas width in px (see [`device_stroke_size`]).
+pub fn device_stroke_width(host: &str) -> f32 {
+    device_stroke_size(host).0
 }
 
 /// UUIDs of documents that carry handwritten annotations, i.e. have a
