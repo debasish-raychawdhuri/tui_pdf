@@ -493,6 +493,45 @@ fn ensure_collection(
 /// their strokes into PDF-point coordinates, and store them locally keyed by
 /// `uuid`. Returns the device's page count (from `.content`) when known, so the
 /// caller can detect pages deleted on the tablet. Read-only on the device.
+/// Parse a `.content` file into an ordered list of `(page_uuid, original_pdf_page)`.
+/// Handles both the flat v1 format (`pages[]` + `redirectionPageMap`) and the v2
+/// `cPages` format used by newer firmware / Paper Pro (`cPages.pages[].id` and
+/// `.redir.value`). `redir` is `None` for pages with no PDF backing (inserted /
+/// notebook pages).
+fn content_pages(content: &serde_json::Value) -> Vec<(String, Option<i64>)> {
+    // v2: cPages.pages[] with per-page id + redir.
+    if let Some(pages) = content
+        .get("cPages")
+        .and_then(|c| c.get("pages"))
+        .and_then(|p| p.as_array())
+    {
+        return pages
+            .iter()
+            .map(|pg| {
+                let id = pg.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let redir = pg.get("redir").and_then(|r| r.get("value")).and_then(|v| v.as_i64());
+                (id, redir)
+            })
+            .collect();
+    }
+    // v1: flat pages[] (uuids) + redirectionPageMap (ints; -1 = inserted).
+    let pages: Vec<String> = content
+        .get("pages")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    let redirect: Vec<i64> = content
+        .get("redirectionPageMap")
+        .and_then(|p| p.as_array())
+        .map(|a| a.iter().map(|v| v.as_i64().unwrap_or(-1)).collect())
+        .unwrap_or_default();
+    pages
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), redirect.get(i).copied().filter(|&n| n >= 0)))
+        .collect()
+}
+
 fn pull_and_store_annotations(
     host: &str,
     uuid: &str,
@@ -507,21 +546,15 @@ fn pull_and_store_annotations(
     let content_text = rm::rm_read_file(host, &format!("{}/{}.content", rm::XOCHITL_DIR, uuid))?;
     let content: serde_json::Value = serde_json::from_str(content_text.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad .content: {e}")))?;
-    let pages: Vec<String> = content
-        .get("pages")
-        .and_then(|p| p.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-        .unwrap_or_default();
-    let redirect: Vec<i64> = content
-        .get("redirectionPageMap")
-        .and_then(|p| p.as_array())
-        .map(|a| a.iter().map(|v| v.as_i64().unwrap_or(-1)).collect())
-        .unwrap_or_default();
+    // Notebooks have no PDF backing: a `.rm` page overlays the blank page at its
+    // ordinal position. PDFs map via `redir` to the original page.
+    let is_notebook = content.get("fileType").and_then(|v| v.as_str()) == Some("notebook");
+    let page_list = content_pages(&content);
     let device_page_count = content
         .get("pageCount")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize)
-        .or(if pages.is_empty() { None } else { Some(pages.len()) });
+        .or(if page_list.is_empty() { None } else { Some(page_list.len()) });
 
     // Skip if our stored copy is already current.
     if device_last_modified_ms > 0 {
@@ -552,16 +585,19 @@ fn pull_and_store_annotations(
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
-            let dev_idx = match pages.iter().position(|p| p == &page_uuid) {
+            let dev_idx = match page_list.iter().position(|(id, _)| id == &page_uuid) {
                 Some(i) => i,
                 None => continue,
             };
-            // device page -> original PDF page via redirectionPageMap; -1 marks
-            // an inserted blank page with no backing PDF page (skip it).
-            let pdf_page = match redirect.get(dev_idx) {
-                Some(&n) if n >= 0 => n as usize,
-                Some(_) => continue,
-                None => dev_idx,
+            // Notebook: overlay at the page's ordinal position. PDF: map via
+            // `redir` to the original page; `None` = inserted blank page (skip).
+            let pdf_page = if is_notebook {
+                dev_idx
+            } else {
+                match page_list[dev_idx].1 {
+                    Some(n) if n >= 0 => n as usize,
+                    _ => continue,
+                }
             };
             if pdf_page >= source.page_count() {
                 continue;
@@ -592,6 +628,7 @@ fn pull_and_store_annotations(
     let ann = rm_lines::DocAnnotations {
         last_modified_ms: device_last_modified_ms,
         device_width,
+        backing_less: is_notebook,
         raw: raw_strokes,
     };
     rm_lines::save(uuid, &ann)?;

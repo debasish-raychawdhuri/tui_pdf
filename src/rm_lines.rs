@@ -59,6 +59,12 @@ pub struct DocAnnotations {
     /// stores strokes in this pixel space and fits PDFs to it; the transform
     /// needs it and it differs by model, so we record what the device reported.
     pub device_width: f32,
+    /// True for pages with no PDF backing (notebooks, inserted pages). These are
+    /// written with arbitrary pan/zoom, so there is no fixed canvas frame — we
+    /// fit each page's strokes to their own bounding box. False for annotations
+    /// registered over a real PDF page (fit-to-width keeps them aligned).
+    #[serde(default)]
+    pub backing_less: bool,
     /// Strokes in canvas coordinates, page already resolved.
     pub raw: Vec<RawPageStroke>,
 }
@@ -75,37 +81,59 @@ impl DocAnnotations {
         F: Fn(usize) -> Option<(f32, f32)>,
     {
         let dw = if self.device_width > 0.0 { self.device_width } else { 1404.0 };
-        let mut map: std::collections::HashMap<usize, Vec<Stroke>> = std::collections::HashMap::new();
+        // Group raw strokes by page first (bbox-fit needs a page's full extent).
+        let mut by_page: std::collections::HashMap<usize, Vec<&RawPageStroke>> =
+            std::collections::HashMap::new();
         for rs in &self.raw {
-            if rs.pts.len() < 2 {
-                continue;
+            if rs.pts.len() >= 2 {
+                by_page.entry(rs.page).or_default().push(rs);
             }
-            let page_w = match page_size(rs.page) {
-                Some((w, _h)) if w > 0.0 => w,
+        }
+
+        let mut map: std::collections::HashMap<usize, Vec<Stroke>> = std::collections::HashMap::new();
+        for (page, strokes) in by_page {
+            let (page_w, page_h) = match page_size(page) {
+                Some((w, h)) if w > 0.0 && h > 0.0 => (w, h),
                 _ => continue,
             };
-            let k = page_w / dw; // PDF points per canvas px (uniform, fit-to-width)
-            let highlighter = is_highlighter(rs.tool_id);
-            let color = color_to_rgb(rs.color_id);
-            let alpha = if highlighter { 0.35 } else { 1.0 };
-            let width_rm = if highlighter {
-                10.0 * rs.thickness.max(1.0)
+
+            // Choose the transform: bounding-box fit for backing-less pages
+            // (pan/zoom means no fixed frame), fit-to-width for PDF-registered
+            // annotations. Both are `pt = raw * k + off`.
+            let (kx, ky, ox, oy) = if self.backing_less {
+                let (mut xmin, mut xmax, mut ymin, mut ymax) =
+                    (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+                for s in &strokes {
+                    for &(x, y) in &s.pts {
+                        xmin = xmin.min(x); xmax = xmax.max(x);
+                        ymin = ymin.min(y); ymax = ymax.max(y);
+                    }
+                }
+                let (bw, bh) = ((xmax - xmin).max(1.0), (ymax - ymin).max(1.0));
+                let margin = 0.04;
+                let k = ((page_w * (1.0 - 2.0 * margin)) / bw)
+                    .min((page_h * (1.0 - 2.0 * margin)) / bh);
+                (k, k, (page_w - bw * k) / 2.0 - xmin * k, (page_h - bh * k) / 2.0 - ymin * k)
             } else {
-                1.5 * rs.thickness.max(0.8)
+                // Fit-to-width: raw x centered on the device, y from the top.
+                let k = page_w / dw;
+                (k, k, dw / 2.0 * k, 0.0)
             };
-            let width_pt = (width_rm * k).max(0.4);
-            let pts = rs
-                .pts
-                .iter()
-                .map(|&(rx, ry)| ((rx + dw / 2.0) * k, ry * k))
-                .collect();
-            map.entry(rs.page).or_default().push(Stroke {
-                page: rs.page,
-                pts,
-                color,
-                width_pt,
-                alpha,
-            });
+
+            let out = map.entry(page).or_default();
+            for rs in strokes {
+                let highlighter = is_highlighter(rs.tool_id);
+                let color = color_to_rgb(rs.color_id);
+                let alpha = if highlighter { 0.35 } else { 1.0 };
+                let width_rm = if highlighter {
+                    10.0 * rs.thickness.max(1.0)
+                } else {
+                    1.5 * rs.thickness.max(0.8)
+                };
+                let width_pt = (width_rm * kx).max(0.4);
+                let pts = rs.pts.iter().map(|&(x, y)| (x * kx + ox, y * ky + oy)).collect();
+                out.push(Stroke { page, pts, color, width_pt, alpha });
+            }
         }
         map
     }
