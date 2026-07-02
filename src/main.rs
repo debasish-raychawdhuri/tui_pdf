@@ -651,10 +651,7 @@ fn pull_and_store_annotations(
     if merge {
         let orig = source.path_or_url().to_string();
         if let Ok(orig_bytes) = fs::read(&orig) {
-            let (w_pt, h_pt) = (
-                device_width * 72.0 / NOTEBOOK_DPI,
-                device_height * 72.0 / NOTEBOOK_DPI,
-            );
+            let (w_pt, h_pt) = backing_page_size(device_width, device_height);
             match rm_lines::build_merged_pdf(&orig_bytes, &inserted, w_pt, h_pt) {
                 Ok(bytes) => {
                     if let Some(parent) = merged_path.parent() {
@@ -671,10 +668,24 @@ fn pull_and_store_annotations(
     Ok((device_page_count, render_path))
 }
 
-/// Assumed device DPI when sizing a notebook's blank backing page. The absolute
-/// size is arbitrary for a notebook (there's no "true" page); only the aspect
-/// (device w:h) matters, since strokes are placed proportionally.
-const NOTEBOOK_DPI: f32 = 226.0;
+/// Size in PDF points for a device-only ("blank") reMarkable page — a notebook
+/// page or a page inserted into a PDF on the tablet. The *absolute* size carries
+/// no meaning: there is no true page, strokes are placed proportionally, and the
+/// page is normalized to the viewport when rendered. Only the device's width:height
+/// **aspect** matters, so we anchor the height to a neutral reference and derive
+/// the width from the aspect — no device DPI needed. Keeping the aspect exact also
+/// keeps the annotation transform's in-frame check (`dh = page_h * dw / page_w`)
+/// equal to the true device height.
+fn backing_page_size(device_width: f32, device_height: f32) -> (f32, f32) {
+    /// Neutral reference height (US Letter). Arbitrary — only the ratio below matters.
+    const REF_HEIGHT_PT: f32 = 792.0;
+    let aspect = if device_height > 0.0 {
+        device_width / device_height
+    } else {
+        0.75 // reMarkable devices are ~3:4; only used if the device reported nothing
+    };
+    (REF_HEIGHT_PT * aspect, REF_HEIGHT_PT)
+}
 
 /// Find notebooks/quick sheets in `folder_uuid` on the device that aren't yet in
 /// the session, render a blank backing PDF for each, pull their strokes, and add
@@ -725,8 +736,7 @@ fn pull_notebooks_in_folder(
             .unwrap_or(1) as usize;
 
         // Blank backing PDF, sized to the device page aspect.
-        let w_pt = device_width * 72.0 / NOTEBOOK_DPI;
-        let h_pt = device_height * 72.0 / NOTEBOOK_DPI;
+        let (w_pt, h_pt) = backing_page_size(device_width, device_height);
         let name = sanitize_name(&item.visible_name);
         let name = if name.trim().is_empty() { "notebook".to_string() } else { name };
         let pdf_path = tui_pdf::config::notebooks_dir()

@@ -97,11 +97,24 @@ impl DocAnnotations {
                 _ => continue,
             };
 
-            // Choose the transform: bounding-box fit for backing-less pages
-            // (pan/zoom means no fixed frame), fit-to-width for PDF-registered
-            // annotations. Both are `pt = raw * k + off`.
+            // Fit-to-width: raw x centered on the device, y from the top. This is
+            // how reMarkable renders every framed page — PDFs and un-panned
+            // notebook / inserted pages alike — so a note written at the top of
+            // the page lands at the top.
+            let fit_to_width = {
+                let k = page_w / dw;
+                (k, k, dw / 2.0 * k, 0.0)
+            };
             let backing_less = strokes.first().map(|s| s.backing_less).unwrap_or(false);
             let (kx, ky, ox, oy) = if backing_less {
+                // A blank page (notebook / inserted page) is written in the same
+                // device frame as a PDF *unless* the user panned/zoomed the
+                // canvas. Measure the strokes' extent: `dh` is this page's height
+                // in canvas px once fit to the device width. If the strokes sit
+                // inside the frame (x within ±dw/2, y within [0, dh]) the page
+                // was not panned, so use fit-to-width — otherwise the content was
+                // moved out of frame, so fall back to a bounding-box fit that
+                // keeps every stroke on the page rather than clipping it.
                 let (mut xmin, mut xmax, mut ymin, mut ymax) =
                     (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
                 for s in &strokes {
@@ -110,15 +123,21 @@ impl DocAnnotations {
                         ymin = ymin.min(y); ymax = ymax.max(y);
                     }
                 }
-                let (bw, bh) = ((xmax - xmin).max(1.0), (ymax - ymin).max(1.0));
-                let margin = 0.04;
-                let k = ((page_w * (1.0 - 2.0 * margin)) / bw)
-                    .min((page_h * (1.0 - 2.0 * margin)) / bh);
-                (k, k, (page_w - bw * k) / 2.0 - xmin * k, (page_h - bh * k) / 2.0 - ymin * k)
+                let half = dw / 2.0;
+                let dh = page_h * dw / page_w;
+                let in_device_frame =
+                    xmin >= -half && xmax <= half && ymin >= 0.0 && ymax <= dh;
+                if in_device_frame {
+                    fit_to_width
+                } else {
+                    let (bw, bh) = ((xmax - xmin).max(1.0), (ymax - ymin).max(1.0));
+                    let margin = 0.04;
+                    let k = ((page_w * (1.0 - 2.0 * margin)) / bw)
+                        .min((page_h * (1.0 - 2.0 * margin)) / bh);
+                    (k, k, (page_w - bw * k) / 2.0 - xmin * k, (page_h - bh * k) / 2.0 - ymin * k)
+                }
             } else {
-                // Fit-to-width: raw x centered on the device, y from the top.
-                let k = page_w / dw;
-                (k, k, dw / 2.0 * k, 0.0)
+                fit_to_width
             };
 
             let out = map.entry(page).or_default();
@@ -562,6 +581,65 @@ mod tests {
     #[test]
     fn rejects_non_v6() {
         assert!(parse_rm_v6(b"not a remarkable file").is_err());
+    }
+
+    /// A notebook note written near the top of the device frame must render near
+    /// the top of the page (device-frame fit-to-width), not vertically centered.
+    /// Regression guard for the bbox-fit bug that centered sparse top content.
+    #[test]
+    fn backing_less_top_content_stays_at_top() {
+        // Paper Pro: 1620px canvas → 516x688pt device-aspect backing page.
+        let (page_w, page_h) = (516.0f32, 688.0f32);
+        let doc = DocAnnotations {
+            last_modified_ms: 0,
+            device_width: 1620.0,
+            raw: vec![RawPageStroke {
+                page: 0,
+                // x centered, y from the top — a short note high on the page.
+                pts: vec![(-100.0, 86.0), (100.0, 299.0)],
+                color_id: 0,
+                tool_id: 2,
+                thickness: 2.0,
+                backing_less: true,
+            }],
+        };
+        let map = doc.strokes_by_page(|_| Some((page_w, page_h)));
+        let strokes = &map[&0];
+        let max_y = strokes[0].pts.iter().fold(0.0f32, |m, &(_, y)| m.max(y));
+        // With fit-to-width (k = 516/1620 ≈ 0.319), y=299 → ~95pt, well within the
+        // top third. The old bbox-fit centered it to ~mid-page (~380pt).
+        assert!(max_y < page_h / 3.0, "content should be near the top, got y={max_y}");
+        // x=0 (device centre) must map to the page centre.
+        let mid_x = strokes[0].pts[0].0.min(strokes[0].pts[1].0)
+            + (strokes[0].pts[1].0 - strokes[0].pts[0].0).abs() / 2.0;
+        assert!((mid_x - page_w / 2.0).abs() < 1.0, "x should be centred, got {mid_x}");
+    }
+
+    /// A panned/zoomed page (content outside the device frame — here negative y)
+    /// still uses the bounding-box fit so nothing is clipped off the page.
+    #[test]
+    fn backing_less_panned_content_uses_bbox_fit() {
+        let (page_w, page_h) = (516.0f32, 688.0f32);
+        let doc = DocAnnotations {
+            last_modified_ms: 0,
+            device_width: 1620.0,
+            raw: vec![RawPageStroke {
+                page: 0,
+                // y goes negative → panned out of frame → bbox-fit centres it.
+                pts: vec![(-100.0, -500.0), (100.0, -300.0)],
+                color_id: 0,
+                tool_id: 2,
+                thickness: 2.0,
+                backing_less: true,
+            }],
+        };
+        let map = doc.strokes_by_page(|_| Some((page_w, page_h)));
+        let strokes = &map[&0];
+        // bbox-fit centres the content vertically regardless of raw y.
+        let min_y = strokes[0].pts.iter().fold(f32::MAX, |m, &(_, y)| m.min(y));
+        let max_y = strokes[0].pts.iter().fold(f32::MIN, |m, &(_, y)| m.max(y));
+        let mid_y = (min_y + max_y) / 2.0;
+        assert!((mid_y - page_h / 2.0).abs() < 2.0, "panned content should be centred, got y={mid_y}");
     }
 
     #[test]
