@@ -63,6 +63,13 @@ pub struct DocAnnotations {
     /// stores strokes in this pixel space and fits PDFs to it; the transform
     /// needs it and it differs by model, so we record what the device reported.
     pub device_width: f32,
+    /// For a PDF opened under "Adjust view" (`zoomMode: customFit`), the width in
+    /// canvas px that a page spans at that custom zoom (`.content`'s
+    /// `customZoomPageWidth`). reMarkable stores strokes against this span, not
+    /// the device width, so the transform must normalize by it — otherwise a
+    /// zoomed-in note renders too big and shifted. `None` for normal fit-to-width.
+    #[serde(default)]
+    pub custom_zoom_page_width: Option<f32>,
     /// Strokes in canvas coordinates, page already resolved. Each stroke carries
     /// its own `backing_less` flag (a merged document mixes PDF-backed pages and
     /// blank inserted pages).
@@ -75,12 +82,21 @@ impl DocAnnotations {
     /// reMarkable fits a PDF page to the device width, so the scale is derived
     /// from each page's own width (`page_size(page) -> (w_pt, h_pt)`), which
     /// makes this correct for any page size and any device (via `device_width`).
-    /// `pdf_x = (raw_x + w/2) * (page_w / device_w)`, `pdf_y = raw_y * (page_w / device_w)`.
+    /// `pdf_x = (raw_x + w/2) * (page_w / span)`, `pdf_y = raw_y * (page_w / span)`.
+    /// `span` is the device width normally, or `customZoomPageWidth` when the PDF
+    /// was written under "Adjust view" (see [`Self::custom_zoom_page_width`]).
     pub fn strokes_by_page<F>(&self, page_size: F) -> std::collections::HashMap<usize, Vec<Stroke>>
     where
         F: Fn(usize) -> Option<(f32, f32)>,
     {
-        let dw = if self.device_width > 0.0 { self.device_width } else { 1404.0 };
+        // The canvas-px width a page spans. Under "Adjust view" reMarkable fits
+        // the page to a custom zoom rather than the device width, and records
+        // strokes against that span; normalize by it so zoomed notes land at the
+        // right size and place.
+        let dw = self
+            .custom_zoom_page_width
+            .filter(|w| *w > 0.0)
+            .unwrap_or(if self.device_width > 0.0 { self.device_width } else { 1404.0 });
         // Group raw strokes by page first (bbox-fit needs a page's full extent).
         let mut by_page: std::collections::HashMap<usize, Vec<&RawPageStroke>> =
             std::collections::HashMap::new();
@@ -593,6 +609,7 @@ mod tests {
         let doc = DocAnnotations {
             last_modified_ms: 0,
             device_width: 1620.0,
+            custom_zoom_page_width: None,
             raw: vec![RawPageStroke {
                 page: 0,
                 // x centered, y from the top — a short note high on the page.
@@ -623,6 +640,7 @@ mod tests {
         let doc = DocAnnotations {
             last_modified_ms: 0,
             device_width: 1620.0,
+            custom_zoom_page_width: None,
             raw: vec![RawPageStroke {
                 page: 0,
                 // y goes negative → panned out of frame → bbox-fit centres it.
@@ -640,6 +658,47 @@ mod tests {
         let max_y = strokes[0].pts.iter().fold(f32::MIN, |m, &(_, y)| m.max(y));
         let mid_y = (min_y + max_y) / 2.0;
         assert!((mid_y - page_h / 2.0).abs() < 2.0, "panned content should be centred, got y={mid_y}");
+    }
+
+    /// A PDF annotation written under "Adjust view" (customFit) must normalize by
+    /// the custom zoom page span, not the device width — otherwise it renders too
+    /// big and shifted down. Numbers are from a real Paper Pro capture: a 612x792pt
+    /// page, device 1620px, customZoomPageWidth 1930, stroke at x:[322..584]
+    /// y:[1093..1199].
+    #[test]
+    fn custom_fit_normalizes_by_zoom_span() {
+        let (page_w, page_h) = (612.0f32, 792.0f32);
+        let stroke = RawPageStroke {
+            page: 16,
+            pts: vec![(322.0, 1093.0), (584.0, 1199.0)],
+            color_id: 0,
+            tool_id: 2,
+            thickness: 2.0,
+            backing_less: false,
+        };
+        let with_zoom = DocAnnotations {
+            last_modified_ms: 0,
+            device_width: 1620.0,
+            custom_zoom_page_width: Some(1930.0),
+            raw: vec![stroke.clone()],
+        };
+        let no_zoom = DocAnnotations {
+            last_modified_ms: 0,
+            device_width: 1620.0,
+            custom_zoom_page_width: None,
+            raw: vec![stroke],
+        };
+        let zy = |d: &DocAnnotations| {
+            let m = d.strokes_by_page(|_| Some((page_w, page_h)));
+            let p = &m[&16][0].pts;
+            p.iter().fold(f32::MIN, |a, &(_, y)| a.max(y))
+        };
+        let y_zoom = zy(&with_zoom); // k = 612/1930 → max y ≈ 380
+        let y_flat = zy(&no_zoom); //  k = 612/1620 → max y ≈ 453
+        // Custom-fit places it higher (smaller y from the top) than the naive fit.
+        assert!(y_zoom < y_flat, "zoom fit should sit higher: {y_zoom} vs {y_flat}");
+        assert!((y_zoom - 380.0).abs() < 2.0, "expected ~380pt, got {y_zoom}");
+        assert!((y_flat - 453.0).abs() < 2.0, "expected ~453pt, got {y_flat}");
     }
 
     #[test]

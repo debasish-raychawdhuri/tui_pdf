@@ -548,6 +548,20 @@ fn pull_and_store_annotations(
     let content: serde_json::Value = serde_json::from_str(content_text.trim())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("bad .content: {e}")))?;
     let is_notebook = content.get("fileType").and_then(|v| v.as_str()) == Some("notebook");
+    // "Adjust view" (zoomMode: customFit) fits the PDF to a custom zoom, and
+    // strokes are recorded against that page span rather than the device width.
+    // Capture it so the overlay transform can normalize by the right width.
+    let custom_zoom_page_width = if content.get("zoomMode").and_then(|v| v.as_str())
+        == Some("customFit")
+    {
+        content
+            .get("customZoomPageWidth")
+            .and_then(|v| v.as_f64())
+            .map(|w| w as f32)
+            .filter(|w| *w > 0.0)
+    } else {
+        None
+    };
     let page_list = content_pages(&content);
     let device_page_count = content
         .get("pageCount")
@@ -643,6 +657,7 @@ fn pull_and_store_annotations(
     let ann = rm_lines::DocAnnotations {
         last_modified_ms: device_last_modified_ms,
         device_width,
+        custom_zoom_page_width,
         raw: raw_strokes,
     };
     rm_lines::save(uuid, &ann)?;
