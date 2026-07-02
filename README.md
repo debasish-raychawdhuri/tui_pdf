@@ -33,8 +33,8 @@ A fast, feature-rich PDF and Markdown viewer for the terminal. Renders PDF pages
 ## Requirements
 
 - A terminal with image support: **Kitty** (recommended), iTerm2, any Sixel-capable terminal, or any terminal for halfblock fallback
-- **Rust** toolchain (stable)
-- System libraries: clang/libclang, chafa, freetype, fontconfig
+- **Rust** toolchain (stable, 1.85+ — the project uses edition 2024)
+- System libraries: clang/libclang, chafa (>= 1.8.0, linked by ratatui-image for halfblock rendering), glib-2.0 (required by chafa), freetype, fontconfig
 
 Optional, per feature:
 
@@ -48,7 +48,7 @@ Optional, per feature:
 
 ### Quick install (recommended)
 
-The install script handles system dependencies, builds the binary, and sets up shell completions:
+The install script handles system dependencies, installs the Rust toolchain via rustup if missing (edition 2024 needs rustc 1.85+), builds the binary, and sets up shell completions:
 
 ```bash
 git clone https://github.com/debasish-raychawdhuri/tui_pdf.git
@@ -64,16 +64,16 @@ Install system dependencies for your distro:
 
 ```bash
 # Debian/Ubuntu
-sudo apt install build-essential pkg-config libclang-dev libchafa-dev libfreetype6-dev libfontconfig1-dev
+sudo apt install build-essential pkg-config libclang-dev libchafa-dev libglib2.0-dev libfreetype6-dev libfontconfig1-dev
 
 # Arch Linux
-sudo pacman -S base-devel pkgconf clang chafa freetype2 fontconfig
+sudo pacman -S base-devel pkgconf clang chafa glib2 freetype2 fontconfig
 
 # Fedora/RHEL
-sudo dnf install gcc gcc-c++ make pkg-config clang-devel chafa-devel freetype-devel fontconfig-devel
+sudo dnf install gcc gcc-c++ make pkg-config clang-devel chafa-devel glib2-devel freetype-devel fontconfig-devel
 
 # openSUSE
-sudo zypper install gcc gcc-c++ make pkg-config clang-devel chafa-devel freetype2-devel fontconfig-devel
+sudo zypper install gcc gcc-c++ make pkg-config clang-devel chafa-devel glib2-devel freetype2-devel fontconfig-devel
 ```
 
 Then build and install:

@@ -5,10 +5,12 @@ set -euo pipefail
 #
 # Required by:
 #   clang/libclang  - bindgen (used by mupdf-sys)
-#   chafa           - ratatui-image terminal graphics
+#   chafa >= 1.8.0  - ratatui-image halfblock rendering (linked via pkg-config)
+#   glib-2.0        - required by chafa.pc (chafa's own pkg-config dependency)
 #   freetype        - font rendering
 #   fontconfig      - font discovery
 #   sqlite          - rusqlite (bundled, but headers needed)
+#   curl + CA certs - bootstrapping the Rust toolchain via rustup
 
 install_debian() {
     echo "Detected Debian/Ubuntu-based system"
@@ -18,8 +20,11 @@ install_debian() {
         pkg-config \
         libclang-dev \
         libchafa-dev \
+        libglib2.0-dev \
         libfreetype6-dev \
-        libfontconfig1-dev
+        libfontconfig1-dev \
+        curl \
+        ca-certificates
 }
 
 install_arch() {
@@ -29,8 +34,11 @@ install_arch() {
         pkgconf \
         clang \
         chafa \
+        glib2 \
         freetype2 \
-        fontconfig
+        fontconfig \
+        curl \
+        ca-certificates
 }
 
 install_fedora() {
@@ -42,8 +50,11 @@ install_fedora() {
         pkg-config \
         clang-devel \
         chafa-devel \
+        glib2-devel \
         freetype-devel \
-        fontconfig-devel
+        fontconfig-devel \
+        curl \
+        ca-certificates
 }
 
 install_suse() {
@@ -55,8 +66,11 @@ install_suse() {
         pkg-config \
         clang-devel \
         chafa-devel \
+        glib2-devel \
         freetype2-devel \
-        fontconfig-devel
+        fontconfig-devel \
+        curl \
+        ca-certificates
 }
 
 if [ -f /etc/os-release ]; then
@@ -83,9 +97,11 @@ if [ -f /etc/os-release ]; then
                     echo "  - C/C++ compiler and build tools"
                     echo "  - pkg-config"
                     echo "  - clang / libclang (for bindgen)"
-                    echo "  - libchafa (development headers)"
+                    echo "  - libchafa >= 1.8.0 (development headers)"
+                    echo "  - glib-2.0 (development headers; required by chafa.pc)"
                     echo "  - freetype (development headers)"
                     echo "  - fontconfig (development headers)"
+                    echo "  - curl and CA certificates (to install rustup)"
                     exit 1
                     ;;
             esac
@@ -95,6 +111,24 @@ else
     echo "Cannot detect distribution (/etc/os-release not found)"
     exit 1
 fi
+
+# ratatui-image links libchafa (halfblocks rendering) and its build.rs
+# requires chafa >= 1.8.0 via pkg-config. chafa.pc in turn Requires glib-2.0,
+# so the glib dev package must be present too. Verify the exact probe the
+# build runs so a broken setup fails here with a clear message, not mid-build.
+echo ""
+echo "==> Verifying chafa..."
+if ! pkg-config --libs --cflags chafa 'chafa >= 1.8.0' > /dev/null; then
+    found="$(pkg-config --modversion chafa 2>/dev/null || echo 'not found')"
+    echo "Error: ratatui-image needs chafa >= 1.8.0 (pkg-config found: $found)." >&2
+    echo "Above is pkg-config's reason. Common causes:" >&2
+    echo "  - chafa dev package missing or older than 1.8.0" >&2
+    echo "    (upgrade it, or build from https://hpjansson.org/chafa/download/)" >&2
+    echo "  - glib-2.0 dev package missing (chafa.pc requires it)" >&2
+    echo "  - chafa.pc installed outside pkg-config's search path (set PKG_CONFIG_PATH)" >&2
+    exit 1
+fi
+echo "  chafa $(pkg-config --modversion chafa) OK"
 
 echo ""
 echo "System dependencies installed. Now run:"
