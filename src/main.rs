@@ -1306,6 +1306,10 @@ fn main() -> io::Result<()> {
         std::process::exit(0);
     }
 
+    // Relocate annotation/notebook storage into the sessions dir if it's still
+    // at the old config-dir location (one-time, no-op once moved).
+    tui_pdf::config::migrate_storage_into_sessions_dir();
+
     // Handle --list-sessions
     if args[1] == "--list-sessions" {
         let sessions = list_sessions();

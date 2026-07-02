@@ -69,17 +69,40 @@ fn sessions_dir() -> PathBuf {
 }
 
 /// Directory holding pulled reMarkable annotations, one `<uuid>.json` per doc.
-/// Kept under the config dir (not the sessions dir) so it's independent of
-/// where sessions are stored / cloud-synced.
+/// Lives *inside* the sessions dir so it travels with sessions (e.g. when the
+/// sessions dir is cloud-synced across computers). It is never uploaded to the
+/// reMarkable — `--sync-sessions` only pushes documents referenced by a
+/// session's docs, and annotations are not among them.
 pub fn annotations_dir() -> PathBuf {
-    config_dir().join("annotations")
+    sessions_dir().join("annotations")
 }
 
 /// Directory holding blank backing PDFs generated for pulled reMarkable
 /// notebooks (which have no PDF of their own). One `<uuid>/<name>.pdf` per
-/// notebook; the strokes are drawn over it via the annotation overlay.
+/// notebook; the strokes are drawn over it via the annotation overlay. Also
+/// under the sessions dir (see [`annotations_dir`]) so it cloud-syncs with
+/// sessions; the tablet is authoritative for notebooks, so these are never
+/// pushed back to it.
 pub fn notebooks_dir() -> PathBuf {
-    config_dir().join("notebooks")
+    sessions_dir().join("notebooks")
+}
+
+/// One-time relocation of annotation/notebook storage from the old location
+/// under the config dir (`<config>/annotations`, `<config>/notebooks`) into the
+/// sessions dir, where they now live. Moves each only when the destination
+/// doesn't already exist — if the sessions dir already has them (e.g. arrived
+/// via cloud sync), that copy wins and the old one is left untouched.
+pub fn migrate_storage_into_sessions_dir() {
+    for name in ["annotations", "notebooks"] {
+        let old = config_dir().join(name);
+        let new = sessions_dir().join(name);
+        if old.exists() && !new.exists() && old != new {
+            if let Some(parent) = new.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let _ = move_path(&old, &new);
+        }
+    }
 }
 
 pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
@@ -93,19 +116,14 @@ pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
             config_dir().join("sessions")
         }
     };
-    // Move existing session files
+    // Move existing session files *and* the annotations/ and notebooks/ subdirs
+    // that now live alongside them.
     if old_path.exists() && old_path != new_path {
         if let Ok(entries) = fs::read_dir(&old_path) {
             for entry in entries.flatten() {
                 let src = entry.path();
-                if src.is_file() {
-                    let dest = new_path.join(entry.file_name());
-                    fs::rename(&src, &dest).or_else(|_| {
-                        // rename fails across filesystems, fall back to copy+remove
-                        fs::copy(&src, &dest)?;
-                        fs::remove_file(&src)
-                    })?;
-                }
+                let dest = new_path.join(entry.file_name());
+                move_path(&src, &dest)?;
             }
         }
         // Remove old dir if empty
@@ -115,6 +133,39 @@ pub fn move_sessions_dir(new_dir: &str) -> io::Result<()> {
     let mut config = load_config();
     config.sessions_dir = Some(new_dir.to_string());
     save_config(&config)
+}
+
+/// Move `src` to `dest`, handling both files and directories. `rename` is one
+/// syscall when the two are on the same filesystem; across filesystems it fails,
+/// so fall back to a recursive copy + remove.
+fn move_path(src: &Path, dest: &Path) -> io::Result<()> {
+    if fs::rename(src, dest).is_ok() {
+        return Ok(());
+    }
+    if src.is_dir() {
+        copy_dir_all(src, dest)?;
+        fs::remove_dir_all(src)
+    } else {
+        fs::copy(src, dest)?;
+        fs::remove_file(src)
+    }
+}
+
+/// Recursively copy the contents of directory `src` into `dest` (created if
+/// needed). Used as the cross-filesystem fallback for [`move_path`].
+fn copy_dir_all(src: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dest.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_all(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn session_path(name: &str) -> PathBuf {
@@ -204,6 +255,24 @@ fn from_portable_path(path: &str, zotero_dir: Option<&str>) -> String {
     path.to_string()
 }
 
+/// Locate the locally-generated backing PDF for a device doc by its UUID,
+/// resolved against the *current* notebooks dir rather than a stored path — so
+/// it keeps working after the sessions dir is moved or cloud-synced to another
+/// machine. Prefers `merged.pdf` (a PDF with pages inserted on the tablet);
+/// otherwise the sole PDF in the dir (a notebook's blank page). `None` if none.
+fn backing_pdf(uuid: &str) -> Option<PathBuf> {
+    let dir = notebooks_dir().join(uuid);
+    let merged = dir.join("merged.pdf");
+    if merged.is_file() {
+        return Some(merged);
+    }
+    fs::read_dir(&dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_file() && p.extension().and_then(|x| x.to_str()) == Some("pdf"))
+}
+
 pub fn load_session(name: &str) -> Option<Session> {
     let path = session_path(name);
     let contents = fs::read_to_string(&path).ok()?;
@@ -213,6 +282,27 @@ pub fn load_session(name: &str) -> Option<Session> {
     for doc in &mut session.docs {
         doc.path = from_portable_path(&doc.path, zotero_dir);
         doc.render_path = doc.render_path.as_ref().map(|p| from_portable_path(p, zotero_dir));
+
+        // Backing PDFs (merged / notebook blanks) live *inside* the sessions dir,
+        // so a stored path goes stale the moment that dir moves. Re-resolve them
+        // from the current notebooks dir by UUID instead of trusting the path.
+        if let Some(uuid) = doc.remarkable_uuid.clone() {
+            match &doc.render_path {
+                Some(rp) if !Path::new(rp).exists() => {
+                    if let Some(p) = backing_pdf(&uuid) {
+                        doc.render_path = Some(p.to_string_lossy().into_owned());
+                    }
+                }
+                // A notebook has no separate source: its blank backing PDF *is*
+                // the doc path, so heal that when it's the thing gone missing.
+                None if !Path::new(&doc.path).exists() => {
+                    if let Some(p) = backing_pdf(&uuid) {
+                        doc.path = p.to_string_lossy().into_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     Some(session)
 }
@@ -244,8 +334,13 @@ pub fn list_sessions() -> Vec<String> {
     let mut names = Vec::new();
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.path().file_stem() {
-                names.push(name.to_string_lossy().to_string());
+            let path = entry.path();
+            // Sessions are `<name>.toml` files; ignore the annotations/ and
+            // notebooks/ subdirs (and anything else) that share this dir.
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("toml") {
+                if let Some(name) = path.file_stem() {
+                    names.push(name.to_string_lossy().to_string());
+                }
             }
         }
     }

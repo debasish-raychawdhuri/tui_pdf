@@ -237,7 +237,7 @@ tui-pdf --setup-zotero ~/Zotero
 
 Save your workspace with `S` — all open documents, scroll positions, and zoom levels are persisted to a named session file. Restore with `tui-pdf --session <name>`. List saved sessions with `tui-pdf --list-sessions`.
 
-**Custom storage:** Move session files to a cloud-synced directory with `tui-pdf --move-sessions <dir>`. Existing sessions are moved automatically.
+**Custom storage:** Move session files to a cloud-synced directory with `tui-pdf --move-sessions <dir>`. Existing sessions — along with pulled annotations and notebook backing pages, which live alongside them — are moved automatically. Point a cloud-synced folder here and your reading positions *and* handwriting follow you across computers.
 
 **Cross-computer sync:** Zotero PDF paths are stored as portable `zotero://KEY/file.pdf` URIs, so sessions work across computers as long as each machine has `--setup-zotero` configured. Paths under your home directory are stored home-relative (`~/…`); other paths remain absolute.
 
@@ -253,11 +253,11 @@ ssh-copy-id root@10.11.99.1
 
 **Sync whole sessions (`tui-pdf --sync-sessions`):** for each saved session (or only the ones you name), every document is pushed to the tablet and reading positions are reconciled **latest-wins** in both directions — so pages you turned on the reMarkable flow back into your session, and pages you moved on the computer flow to the tablet. Markdown documents are skipped (the tablet can't open them natively). The tablet's UI refreshes once at the end.
 
-**Pull scribbles back:** `--sync-sessions` also pulls handwritten annotations *down* from the tablet (the reMarkable is authoritative for scribbles — pulling is read-only on the device). The device stores strokes as separate v6 `.rm` files, not inside the PDF; tui-pdf parses them, converts them to vector overlays, and stores them under `~/.config/tui-pdf/annotations/`. When you open the document, your handwriting is drawn on top of the PDF. Toggle the overlay with `a`.
+**Pull scribbles back:** `--sync-sessions` also pulls handwritten annotations *down* from the tablet (the reMarkable is authoritative for scribbles — pulling is read-only on the device). The device stores strokes as separate v6 `.rm` files, not inside the PDF; tui-pdf parses them, converts them to vector overlays, and stores them in an `annotations/` folder inside your sessions dir — so they cloud-sync with your sessions but are never uploaded back to the tablet. When you open the document, your handwriting is drawn on top of the PDF. Toggle the overlay with `a`.
 
-**Inserted pages are kept in position.** If you insert blank pages into a PDF on the tablet and write on them, tui-pdf rebuilds a merged copy of the document (original pages + your blank pages in their real positions) so the notes show up exactly where you added them. The merged copy lives under `~/.config/tui-pdf/`; your original file is never modified and stays the sync source of truth.
+**Inserted pages are kept in position.** If you insert blank pages into a PDF on the tablet and write on them, tui-pdf rebuilds a merged copy of the document (original pages + your blank pages in their real positions) so the notes show up exactly where you added them. The merged copy lives in your sessions dir; your original file is never modified and stays the sync source of truth.
 
-**Pull notebooks back:** notebooks and quick sheets you create *inside* a synced session's folder on the tablet are pulled too. Since a notebook has no PDF of its own, tui-pdf renders a blank backing page (sized to the device) and draws your strokes over it — so a reMarkable notebook opens and scrolls just like any other document, and is added to the session automatically. (The blank pages are generated per computer under `~/.config/tui-pdf/notebooks/`, so a session opened on a machine that hasn't synced yet won't have them until it does.)
+**Pull notebooks back:** notebooks and quick sheets you create *inside* a synced session's folder on the tablet are pulled too. Since a notebook has no PDF of its own, tui-pdf renders a blank backing page (sized to the device) and draws your strokes over it — so a reMarkable notebook opens and scrolls just like any other document, and is added to the session automatically. (The blank pages live in a `notebooks/` folder inside your sessions dir, so if that dir is cloud-synced they travel with the session; otherwise they're regenerated the next time that machine syncs.)
 
 Sync defaults to the USB address (`10.11.99.1`). To sync over WiFi, enable SSH-over-WLAN on the tablet (`rm-ssh-over-wlan on`) and pass its WiFi address with `--ip`:
 
