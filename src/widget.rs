@@ -336,6 +336,56 @@ impl PdfViewState {
         self.global_scroll = self.global_scroll.min(self.total_stripes.saturating_sub(1));
     }
 
+    /// Replace the terminal image picker after a terminal resize.  A window can
+    /// keep the same number of character cells while moving to a monitor with
+    /// a different scale factor; in that case the cell's pixel dimensions
+    /// change and every cached stripe has the wrong height.
+    ///
+    /// Returns `true` only when the pixel dimensions actually changed.  This
+    /// keeps ordinary resize notifications from needlessly re-rendering pages.
+    pub fn refresh_terminal_geometry(
+        &mut self,
+        source: &ContentSource,
+        picker: Picker,
+    ) -> Result<bool> {
+        let old_font_size = self.picker.font_size();
+        let new_font_size = picker.font_size();
+        if old_font_size.width == new_font_size.width
+            && old_font_size.height == new_font_size.height
+        {
+            return Ok(false);
+        }
+
+        // Keep the same document point at the top of the viewport while the
+        // stripe grid is rebuilt using the new cell height.
+        let (page, pdf_y) = self.current_pdf_position();
+        self.picker = picker;
+        self.recompute_geometry(source)?;
+        self.cache = StripeCache::new();
+        self.rendered_pages.clear();
+        self.dirty_highlight_stripes.clear();
+        self.prerender_queue.clear();
+        self.prerender_pos = 0;
+        self.last_link_overlay = None;
+        self.last_search_overlay = None;
+
+        if page < self.cumulative_stripes.len() {
+            let font_height = self.picker.font_size().height.max(1) as f32;
+            let scale = (crate::renderer::DEFAULT_DPI / 72.0) * self.zoom;
+            let stripe = (pdf_y * scale / font_height) as usize;
+            self.global_scroll = (self.cumulative_stripes[page] + stripe)
+                .min(self.total_stripes.saturating_sub(1));
+        } else {
+            self.global_scroll = 0;
+        }
+
+        // Geometry was already recomputed above; keep initial_render from
+        // treating the unchanged zoom cache key as an old geometry marker.
+        self.last_key = self.cache_key();
+        self.initial_render(source)?;
+        Ok(true)
+    }
+
     /// Drop all cached protocols so visible stripes are re-encoded and the
     /// kitty image data is re-transmitted on the next render. The stripe PNG
     /// cache is kept, so rebuilding is cheap. Needed after an interrupted

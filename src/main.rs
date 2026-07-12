@@ -2166,6 +2166,25 @@ fn run_app(
                 Err(_) => continue,
             };
 
+            // A monitor scale-factor change may leave the character grid
+            // unchanged while changing the pixel size of every cell. Re-query
+            // the image picker on resize, but rebuild page stripes only when
+            // those pixel dimensions actually differ.
+            if let Event::Resize(_, _) = ev {
+                let _ = terminal.autoresize();
+                if let Ok(mut picker) = Picker::from_query_stdio() {
+                    picker.set_background_color(Some(image::Rgba([0, 0, 0, 255])));
+                    match pdf_state.refresh_terminal_geometry(source, picker) {
+                        Ok(true) => {
+                            free_kitty_images();
+                            let _ = terminal.clear();
+                        }
+                        Ok(false) | Err(_) => {}
+                    }
+                }
+                continue;
+            }
+
             // Handle mouse events
             if let Event::Mouse(mouse) = ev {
                 match mouse.kind {
