@@ -39,7 +39,10 @@ def shot(name, extra):
     os.remove(svg)
     print("wrote", name + ".png")
 
-shot("pdf_view", [])
+# Advance a few pages so the hero shot lands on body content rather than
+# whatever (possibly sparse) page the session was left on.
+shot("pdf_view", [{"op": "send_keys", "keys": ["n", "n", "n"]},
+                  {"op": "wait", "idle_ms": 1200, "budget_ms": 20000}])
 shot("file_browser", [{"op": "send_keys", "keys": ["e"]}, {"op": "wait", "idle_ms": 600, "budget_ms": 8000}])
 shot("doc_picker", [{"op": "send_keys", "keys": ["d"]}, {"op": "wait", "idle_ms": 500, "budget_ms": 6000}])
 shot("toc", [{"op": "send_keys", "keys": ["t"]}, {"op": "wait", "idle_ms": 600, "budget_ms": 8000}])
