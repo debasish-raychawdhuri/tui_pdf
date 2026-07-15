@@ -190,9 +190,15 @@ fn render_metadata_overlay(
     }
 }
 
-fn build_session(open_docs: &[OpenDoc], current_idx: usize, pdf_state: &PdfViewState) -> Session {
+fn build_session(
+    open_docs: &[OpenDoc],
+    current_idx: usize,
+    pdf_state: &PdfViewState,
+    last_browse_dir: Option<&str>,
+) -> Session {
     let now = tui_pdf::remarkable::now_secs();
     Session {
+        last_browse_dir: last_browse_dir.map(|s| s.to_string()),
         docs: open_docs.iter().enumerate().map(|(i, d)| {
             let is_current = i == current_idx;
             let page = if is_current { Some(pdf_state.current_page()) } else { d.page };
@@ -1052,6 +1058,8 @@ enum AppAction {
     SwitchDoc(usize),
     CloseDoc,
     OpenLatest,
+    /// Open a PDF (or other document) by browsing the filesystem
+    OpenFile,
     /// Temporary URL preview (from metadata view) — not added to open docs
     PreviewUrl(String),
 }
@@ -1180,6 +1188,7 @@ KEYBINDINGS:
     s                           SyncTeX probe (keyboard reverse search)
     o                           Open Zotero browser
     O                           Open latest Zotero PDF
+    e                           Open a file from the filesystem (file browser)
     R                           Send PDF to reMarkable over USB (SSH in Developer
                                 Mode, else the USB web interface)
     C                           Send PDF to reMarkable cloud (rmapi)
@@ -1494,6 +1503,9 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
     let zotero_dir: Option<String> = load_config().zotero_dir;
     let session_name = session_name;
     let mut saved_session_name: Option<String> = None;
+    // Directory the filesystem browser (`e`) last visited; restored from the
+    // session and persisted back into it. Defaults to $HOME on first use.
+    let mut last_browse_dir: Option<String> = session.and_then(|s| s.last_browse_dir.clone());
 
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -1585,7 +1597,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                             width: area.width, height: 1,
                         };
                         let status = Paragraph::new(Span::styled(
-                            " Tab: switch doc | d: doc picker | q: quit ",
+                            " Tab: switch doc | d: doc picker | e: open file | q: quit ",
                             Style::default().fg(Color::Black).bg(Color::Cyan),
                         )).style(Style::default().bg(Color::Cyan));
                         status.render(status_area, frame.buffer_mut());
@@ -1608,6 +1620,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                                 }
                                 KeyCode::Char('o') => break Ok(AppAction::OpenZotero),
                                 KeyCode::Char('O') => break Ok(AppAction::OpenLatest),
+                                KeyCode::Char('e') => break Ok(AppAction::OpenFile),
                                 _ => {}
                             }
                         }
@@ -1643,6 +1656,11 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                             if let Some(path) = latest_pdf(std::path::Path::new(dir)) {
                                 current_path = path.to_string_lossy().to_string();
                             }
+                        }
+                    }
+                    Ok(AppAction::OpenFile) => {
+                        if let Some(path) = browse_for_file(&mut last_browse_dir)? {
+                            current_path = path;
                         }
                     }
                     _ => {}
@@ -1715,6 +1733,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
             &session_name,
             &zotero_dir,
             &mut saved_session_name,
+            last_browse_dir.as_deref(),
         );
 
         if let Some(ref s) = sock {
@@ -1779,6 +1798,11 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                     }
                 }
             }
+            Ok(AppAction::OpenFile) => {
+                if let Some(path) = browse_for_file(&mut last_browse_dir)? {
+                    current_path = path;
+                }
+            }
             Ok(AppAction::PreviewUrl(url)) => {
                 // Temporary preview: capture and display the URL, then return to current doc
                 let _ = terminal.draw(|frame| {
@@ -1816,6 +1840,7 @@ fn open_viewer(pdf_paths: &[&str], session_name: Option<String>, session: Option
                             &session_name,
                             &zotero_dir,
                             &mut saved_session_name,
+                            last_browse_dir.as_deref(),
                         );
                         // After quitting the preview, return to the current document
                         inverted = pdf_state.inverted();
@@ -1857,6 +1882,7 @@ fn run_app(
     session_name: &Option<String>,
     zotero_dir: &Option<String>,
     saved_session_name: &mut Option<String>,
+    last_browse_dir: Option<&str>,
 ) -> io::Result<AppAction> {
     // Auto-reload state (PDF only)
     let mut last_mtime: Option<SystemTime> = if source.is_pdf() {
@@ -2304,7 +2330,7 @@ fn run_app(
                             if let Some(name) = session_input.take() {
                                 let name = name.trim().to_string();
                                 if !name.is_empty() {
-                                    let sess = build_session(&open_docs, current_idx, &pdf_state);
+                                    let sess = build_session(&open_docs, current_idx, &pdf_state, last_browse_dir);
                                     match save_session(&name, &sess) {
                                         Ok(_) => {
                                             status_message = Some((
@@ -2485,10 +2511,11 @@ fn run_app(
                         KeyCode::Char('x') => return Ok(AppAction::CloseDoc),
                         KeyCode::Char('o') => return Ok(AppAction::OpenZotero),
                         KeyCode::Char('O') => return Ok(AppAction::OpenLatest),
+                        KeyCode::Char('e') => return Ok(AppAction::OpenFile),
                         KeyCode::Char('S') => {
                             if let Some(name) = saved_session_name.as_ref().or(session_name.as_ref()) {
                                 let name = name.clone();
-                                let sess = build_session(&open_docs, current_idx, &pdf_state);
+                                let sess = build_session(&open_docs, current_idx, &pdf_state, last_browse_dir);
                                 match save_session(&name, &sess) {
                                     Ok(_) => {
                                         status_message = Some((
@@ -2981,4 +3008,286 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
     let _ = disable_raw_mode();
     let _ = stdout().execute(LeaveAlternateScreen);
     Ok(result)
+}
+
+/// File extensions the filesystem browser offers as openable documents.
+const BROWSABLE_EXTS: &[&str] = &[
+    "pdf", "epub", "xps", "cbz", "fb2", "mobi", "svg",
+    "tex", "md", "markdown",
+];
+
+fn is_browsable_file(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| BROWSABLE_EXTS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        .unwrap_or(false)
+}
+
+/// The user's home directory — the default starting point for the file browser.
+fn home_dir() -> std::path::PathBuf {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+/// Suspend the viewer's terminal state, let the user pick a file from the
+/// filesystem, then restore it. The browser opens at `last_dir` (the directory
+/// this session last browsed) or `$HOME` on first use; `last_dir` is updated to
+/// wherever the browser ends so the next open resumes there. Returns the
+/// selected path (with `.tex` resolved to its PDF), or `None` if cancelled.
+fn browse_for_file(last_dir: &mut Option<String>) -> io::Result<Option<String>> {
+    let start = last_dir
+        .as_deref()
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(home_dir);
+
+    let _ = stdout().execute(DisableMouseCapture);
+    let _ = stdout().execute(LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+
+    let (final_dir, picked) = run_file_browser(&start)?;
+
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
+
+    *last_dir = Some(final_dir.to_string_lossy().to_string());
+    Ok(picked.map(|p| resolve_tex_to_pdf(&p.to_string_lossy())))
+}
+
+/// A row in the filesystem browser: the parent directory, a subdirectory, or a
+/// selectable file.
+enum FileItem {
+    Parent,
+    Dir(std::path::PathBuf),
+    File(std::path::PathBuf),
+}
+
+/// A simple TUI file browser rooted at `start`. Directories sort before files;
+/// only document-like files (see `BROWSABLE_EXTS`) are listed. Navigate with
+/// j/k or arrows, Enter to descend or open, Backspace/h to go up, `/` to
+/// filter, `.` to toggle hidden files, Esc/q to cancel. Returns the directory
+/// the browser ended in (so the caller can resume there) and the picked file
+/// (`None` if cancelled).
+fn run_file_browser(
+    start: &std::path::Path,
+) -> io::Result<(std::path::PathBuf, Option<std::path::PathBuf>)> {
+    let mut cur_dir = start.canonicalize().unwrap_or_else(|_| start.to_path_buf());
+    let mut selected: usize = 0;
+    let mut filter = String::new();
+    let mut searching = false;
+    let mut show_hidden = false;
+
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = loop {
+        // Build the item list for the current directory.
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        let mut files: Vec<std::path::PathBuf> = Vec::new();
+        if let Ok(rd) = fs::read_dir(&cur_dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if !show_hidden && name.starts_with('.') {
+                    continue;
+                }
+                let ft = entry.file_type();
+                let is_dir = ft.map(|t| t.is_dir()).unwrap_or(false);
+                if is_dir {
+                    dirs.push(path);
+                } else if is_browsable_file(&path) {
+                    files.push(path);
+                }
+            }
+        }
+        let name_of = |p: &std::path::Path| {
+            p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default()
+        };
+        dirs.sort_by_key(|p| name_of(p).to_lowercase());
+        files.sort_by_key(|p| name_of(p).to_lowercase());
+
+        let lower = filter.to_lowercase();
+        let matches = |p: &std::path::Path| {
+            filter.is_empty() || name_of(p).to_lowercase().contains(&lower)
+        };
+
+        let mut items: Vec<FileItem> = Vec::new();
+        if cur_dir.parent().is_some() {
+            items.push(FileItem::Parent);
+        }
+        for d in dirs.into_iter().filter(|p| matches(p)) {
+            items.push(FileItem::Dir(d));
+        }
+        for f in files.into_iter().filter(|p| matches(p)) {
+            items.push(FileItem::File(f));
+        }
+
+        if selected >= items.len() {
+            selected = items.len().saturating_sub(1);
+        }
+
+        terminal.draw(|frame| {
+            let chunks = Layout::vertical([
+                Constraint::Length(1), // path / search
+                Constraint::Min(1),    // list
+                Constraint::Length(1), // status
+            ])
+            .split(frame.area());
+
+            // Top bar: current directory or search input.
+            let top = if searching {
+                format!(" /{}█", filter)
+            } else {
+                format!(" {}", cur_dir.display())
+            };
+            Paragraph::new(Line::from(vec![Span::styled(
+                top,
+                Style::default().fg(Color::Black).bg(Color::Cyan),
+            )]))
+            .style(Style::default().bg(Color::Cyan))
+            .render(chunks[0], frame.buffer_mut());
+
+            let list_height = chunks[1].height as usize;
+            let scroll_offset = if selected >= list_height {
+                selected - list_height + 1
+            } else {
+                0
+            };
+
+            for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
+                let is_selected = scroll_offset + row == selected;
+                let width = chunks[1].width as usize;
+                let (text, base) = match item {
+                    FileItem::Parent => ("../".to_string(), Color::Yellow),
+                    FileItem::Dir(p) => (format!("{}/", name_of(p)), Color::Yellow),
+                    FileItem::File(p) => (format!("  {}", name_of(p)), Color::White),
+                };
+                let truncated = if text.chars().count() > width {
+                    let mut t: String = text.chars().take(width.saturating_sub(1)).collect();
+                    t.push('…');
+                    t
+                } else {
+                    text
+                };
+                let style = if is_selected {
+                    Style::default().fg(Color::Black).bg(Color::White)
+                } else {
+                    Style::default().fg(base)
+                };
+                let area = ratatui::layout::Rect {
+                    x: chunks[1].x,
+                    y: chunks[1].y + row as u16,
+                    width: chunks[1].width,
+                    height: 1,
+                };
+                Paragraph::new(Span::styled(truncated, style))
+                    .style(style)
+                    .render(area, frame.buffer_mut());
+            }
+
+            let status = format!(
+                " {} items | Enter: open/enter | Backspace: up | /: filter | .: {} hidden | Esc: cancel ",
+                items.len(),
+                if show_hidden { "hide" } else { "show" },
+            );
+            Paragraph::new(Line::from(vec![Span::styled(
+                status,
+                Style::default().fg(Color::White).bg(Color::DarkGray),
+            )]))
+            .style(Style::default().bg(Color::DarkGray))
+            .render(chunks[2], frame.buffer_mut());
+        })?;
+
+        if event::poll(Duration::from_millis(100))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Esc => {
+                        if searching {
+                            searching = false;
+                            filter.clear();
+                            selected = 0;
+                        } else {
+                            break None;
+                        }
+                    }
+                    KeyCode::Enter => match items.get(selected) {
+                        Some(FileItem::Parent) => {
+                            if let Some(parent) = cur_dir.parent() {
+                                cur_dir = parent.to_path_buf();
+                                selected = 0;
+                                searching = false;
+                                filter.clear();
+                            }
+                        }
+                        Some(FileItem::Dir(p)) => {
+                            cur_dir = p.clone();
+                            selected = 0;
+                            searching = false;
+                            filter.clear();
+                        }
+                        Some(FileItem::File(p)) => break Some(p.clone()),
+                        None => {}
+                    },
+                    KeyCode::Backspace => {
+                        if searching {
+                            filter.pop();
+                            if filter.is_empty() {
+                                searching = false;
+                            }
+                            selected = 0;
+                        } else if let Some(parent) = cur_dir.parent() {
+                            cur_dir = parent.to_path_buf();
+                            selected = 0;
+                        }
+                    }
+                    KeyCode::Up => selected = selected.saturating_sub(1),
+                    KeyCode::Down => {
+                        if !items.is_empty() {
+                            selected = (selected + 1).min(items.len() - 1);
+                        }
+                    }
+                    // While searching, every character types into the filter.
+                    KeyCode::Char(c) if searching => {
+                        filter.push(c);
+                        selected = 0;
+                    }
+                    KeyCode::Char('j') => {
+                        if !items.is_empty() {
+                            selected = (selected + 1).min(items.len() - 1);
+                        }
+                    }
+                    KeyCode::Char('k') => selected = selected.saturating_sub(1),
+                    KeyCode::Char('h') | KeyCode::Left => {
+                        if let Some(parent) = cur_dir.parent() {
+                            cur_dir = parent.to_path_buf();
+                            selected = 0;
+                        }
+                    }
+                    KeyCode::Char('/') => {
+                        searching = true;
+                        filter.clear();
+                        selected = 0;
+                    }
+                    KeyCode::Char('.') => {
+                        show_hidden = !show_hidden;
+                        selected = 0;
+                    }
+                    KeyCode::Char('q') => break None,
+                    _ => {}
+                }
+            }
+        }
+    };
+
+    let _ = disable_raw_mode();
+    let _ = stdout().execute(LeaveAlternateScreen);
+    Ok((cur_dir, result))
 }

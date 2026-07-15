@@ -43,6 +43,10 @@ pub struct SessionDoc {
 pub struct Session {
     pub docs: Vec<SessionDoc>,
     pub current: usize,
+    /// Directory the filesystem browser (`e`) last visited in this session, so
+    /// it reopens where the user left off. `None` until the browser is used.
+    #[serde(default)]
+    pub last_browse_dir: Option<String>,
 }
 
 fn config_dir() -> PathBuf {
@@ -279,6 +283,10 @@ pub fn load_session(name: &str) -> Option<Session> {
     let mut session: Session = toml::from_str(&contents).ok()?;
     let config = load_config();
     let zotero_dir = config.zotero_dir.as_deref();
+    session.last_browse_dir = session
+        .last_browse_dir
+        .as_deref()
+        .map(|p| from_portable_path(p, zotero_dir));
     for doc in &mut session.docs {
         doc.path = from_portable_path(&doc.path, zotero_dir);
         doc.render_path = doc.render_path.as_ref().map(|p| from_portable_path(p, zotero_dir));
@@ -324,6 +332,7 @@ pub fn save_session(name: &str, session: &Session) -> io::Result<()> {
             render_path: d.render_path.as_ref().map(|p| to_portable_path(p, zotero_dir)),
         }).collect(),
         current: session.current,
+        last_browse_dir: session.last_browse_dir.as_deref().map(|p| to_portable_path(p, zotero_dir)),
     };
     let contents = toml::to_string_pretty(&portable).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
     fs::write(&path, contents)
