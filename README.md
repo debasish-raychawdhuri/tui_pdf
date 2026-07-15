@@ -23,6 +23,7 @@ A fast, feature-rich PDF and Markdown viewer for the terminal. Renders PDF pages
 - **SyncTeX forward search** — integrates with texlab LSP to scroll the PDF to the source position (`tui-pdf --forward line:col:file doc.pdf`)
 - **Mouse wheel scrolling** — scroll through the document with the mouse wheel
 - **Fit to width** — resize zoom to fit the page width to the terminal (`w`)
+- **File browser** — open any document from the filesystem without leaving the viewer (`e`): a directory browser starting at your home directory (or the last directory you visited this session), listing PDFs, EPUBs, Markdown, and other supported files
 - **Zotero integration** — browse your Zotero library and open PDFs directly (`tui-pdf --zotero` or `o` from within the viewer), view metadata (`m`), and copy BibTeX to clipboard (`c`)
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
@@ -176,6 +177,7 @@ tui-pdf --completions zsh
 | `u` (in metadata view) | Open the document's URL (or DOI) in a browser |
 | `o` | Open Zotero browser |
 | `O` | Open latest Zotero PDF |
+| `e` | Open a file from the filesystem (file browser) |
 | `s` | SyncTeX probe (numbered overlay for keyboard reverse search) |
 | `d` | Document picker |
 | `Tab` / `Shift+Tab` | Cycle between open documents |
