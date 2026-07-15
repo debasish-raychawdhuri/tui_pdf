@@ -5,6 +5,28 @@ A fast, feature-rich PDF and Markdown viewer for the terminal. Renders PDF pages
 ![Rust](https://img.shields.io/badge/rust-stable-orange)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
+## Screenshots
+
+A PDF rendered in the terminal, with the status bar showing page/zoom:
+
+![PDF view](docs/screenshots/pdf_view.png)
+
+Incremental search highlights matches on the page:
+
+![Search](docs/screenshots/search.png)
+
+The table of contents opens as a side panel next to the page:
+
+![Table of contents](docs/screenshots/toc.png)
+
+Open any file from disk without leaving the viewer (`e`), or switch between open documents (`d`):
+
+| File browser | Document picker |
+|---|---|
+| ![File browser](docs/screenshots/file_browser.png) | ![Document picker](docs/screenshots/doc_picker.png) |
+
+<sub>Screenshots are generated automatically from the running binary by the [`ghostty-term-use`](https://github.com/debasish-raychawdhuri/ghostty-term-use) harness (a libghostty-vt terminal on a PTY), so they always reflect the real rendered output.</sub>
+
 ## Features
 
 - **High-quality rendering** — PDF pages rendered at 192 DPI via MuPDF, displayed using your terminal's native image protocol (Kitty, Sixel, iTerm2, or halfblock fallback)
