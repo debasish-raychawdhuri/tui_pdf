@@ -48,4 +48,6 @@ shot("doc_picker", [{"op": "send_keys", "keys": ["d"]}, {"op": "wait", "idle_ms"
 shot("toc", [{"op": "send_keys", "keys": ["t"]}, {"op": "wait", "idle_ms": 600, "budget_ms": 8000}])
 shot("search", [{"op": "send_keys", "keys": ["/"]}, {"op": "send_text", "text": "field"},
                 {"op": "send_keys", "keys": ["Enter"]}, {"op": "wait", "idle_ms": 1500, "budget_ms": 15000}])
+# Zotero library browser (requires a configured Zotero dir).
+shot("zotero", [{"op": "send_keys", "keys": ["o"]}, {"op": "wait", "idle_ms": 1200, "budget_ms": 20000}])
 print("done")

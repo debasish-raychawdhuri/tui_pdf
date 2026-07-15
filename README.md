@@ -19,6 +19,10 @@ The table of contents opens as a side panel next to the page:
 
 ![Table of contents](docs/screenshots/toc.png)
 
+Browse your Zotero library and open papers directly (`o`):
+
+![Zotero browser](docs/screenshots/zotero.png)
+
 Open any file from disk without leaving the viewer (`e`), or switch between open documents (`d`):
 
 | File browser | Document picker |
