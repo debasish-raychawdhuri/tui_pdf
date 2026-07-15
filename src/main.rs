@@ -14,7 +14,7 @@ use ratatui::buffer::CellDiffOption;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Paragraph, StatefulWidget, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Paragraph, StatefulWidget, Widget};
 use ratatui::Terminal;
 use ratatui_image::picker::Picker;
 
@@ -139,22 +139,27 @@ fn render_metadata_overlay(
     area: ratatui::layout::Rect,
     buf: &mut ratatui::buffer::Buffer,
 ) {
-    let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-    let title_area = ratatui::layout::Rect {
-        x: area.x, y: area.y, width: area.width, height: 1,
-    };
-    Paragraph::new(Span::styled(" Metadata (c: copy BibTeX | u: open URL | Esc/m: close) ", title_style))
-        .style(title_style)
-        .render(title_area, buf);
+    // Wrap the fields in a rounded border with the help text as its title,
+    // matching the file/Zotero browsers.
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Span::styled(
+            " Metadata (c: copy BibTeX | u: open URL | Esc/m: close) ",
+            Style::default().fg(Color::Cyan),
+        ));
+    let inner = block.inner(area);
+    block.render(area, buf);
 
     let label_style = Style::default().fg(Color::Yellow);
     let value_style = Style::default().fg(Color::White);
     let max_label = fields.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
     let prefix_width = 2 + max_label + 2; // "  Label: "
-    let value_width = (area.width as usize).saturating_sub(prefix_width);
-    let mut row = area.y + 2;
+    let value_width = (inner.width as usize).saturating_sub(prefix_width);
+    let mut row = inner.y;
     for (label, value) in fields.iter() {
-        if row >= area.y + area.height { break; }
+        if row >= inner.y + inner.height { break; }
         let prefix = format!("  {:>width$}: ", label, width = max_label);
         let lines: Vec<&str> = if value_width > 0 && value.len() > value_width {
             let mut parts = Vec::new();
@@ -169,9 +174,9 @@ fn render_metadata_overlay(
             vec![value.as_str()]
         };
         for (li, line_text) in lines.iter().enumerate() {
-            if row >= area.y + area.height { break; }
+            if row >= inner.y + inner.height { break; }
             let line_area = ratatui::layout::Rect {
-                x: area.x, y: row, width: area.width, height: 1,
+                x: inner.x, y: row, width: inner.width, height: 1,
             };
             let line = if li == 0 {
                 Line::from(vec![
@@ -2012,17 +2017,20 @@ fn run_app(
                     frame.buffer_mut(),
                 );
             } else if doc_picker.is_some() {
-                // Document picker: render list in main area
+                // Document picker: bordered list in the main area
                 let sel = doc_picker.unwrap();
-                let title_style = Style::default().fg(Color::Black).bg(Color::Cyan);
-                let title_area = ratatui::layout::Rect {
-                    x: main_area.x, y: main_area.y, width: main_area.width, height: 1,
-                };
-                Paragraph::new(Span::styled(" Open Documents ", title_style))
-                    .style(title_style)
-                    .render(title_area, frame.buffer_mut());
+                let block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan))
+                    .title(Span::styled(
+                        " Open Documents (Enter: switch | x: close | Esc: cancel) ",
+                        Style::default().fg(Color::Cyan),
+                    ));
+                let inner = block.inner(main_area);
+                block.render(main_area, frame.buffer_mut());
 
-                let list_height = (main_area.height as usize).saturating_sub(1);
+                let list_height = inner.height as usize;
                 for (i, doc) in open_docs.iter().enumerate().take(list_height) {
                     let label = std::path::Path::new(&doc.path)
                         .file_name()
@@ -2030,7 +2038,7 @@ fn run_app(
                         .unwrap_or_else(|| doc.path.clone());
                     let marker = if i == current_idx { "* " } else { "  " };
                     let text = format!(" {}{}", marker, label);
-                    let width = main_area.width as usize;
+                    let width = inner.width as usize;
                     let truncated = if text.len() > width {
                         format!("{}…", &text[..width - 1])
                     } else {
@@ -2042,8 +2050,8 @@ fn run_app(
                         Style::default().fg(Color::White).bg(Color::Reset)
                     };
                     let area = ratatui::layout::Rect {
-                        x: main_area.x, y: main_area.y + 1 + i as u16,
-                        width: main_area.width, height: 1,
+                        x: inner.x, y: inner.y + i as u16,
+                        width: inner.width, height: 1,
                     };
                     Paragraph::new(Span::styled(truncated, style))
                         .style(style)
@@ -2856,8 +2864,15 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                     frame.buffer_mut(),
                 );
             } else {
-                // List
-                let list_height = chunks[1].height as usize;
+                // List, wrapped in a rounded border to match the file browser.
+                let list_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(Color::Cyan));
+                let inner = list_block.inner(chunks[1]);
+                list_block.render(chunks[1], frame.buffer_mut());
+
+                let list_height = inner.height as usize;
                 let scroll_offset = if selected >= list_height {
                     selected - list_height + 1
                 } else {
@@ -2866,7 +2881,7 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
 
                 for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
                     let is_selected = scroll_offset + row == selected;
-                    let width = chunks[1].width as usize;
+                    let width = inner.width as usize;
 
                     let text = match item {
                         BrowserItem::Collection { name, .. } => {
@@ -2893,9 +2908,9 @@ fn run_zotero_browser(library: &ZoteroLibrary) -> io::Result<Option<std::path::P
                     };
 
                     let area = ratatui::layout::Rect {
-                        x: chunks[1].x,
-                        y: chunks[1].y + row as u16,
-                        width: chunks[1].width,
+                        x: inner.x,
+                        y: inner.y + row as u16,
+                        width: inner.width,
                         height: 1,
                     };
                     Paragraph::new(Span::styled(truncated, style))
@@ -3152,7 +3167,15 @@ fn run_file_browser(
             .style(Style::default().bg(Color::Cyan))
             .render(chunks[0], frame.buffer_mut());
 
-            let list_height = chunks[1].height as usize;
+            // Draw a rounded border around the list and place rows inside it.
+            let list_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Cyan));
+            let inner = list_block.inner(chunks[1]);
+            list_block.render(chunks[1], frame.buffer_mut());
+
+            let list_height = inner.height as usize;
             let scroll_offset = if selected >= list_height {
                 selected - list_height + 1
             } else {
@@ -3161,7 +3184,7 @@ fn run_file_browser(
 
             for (row, item) in items.iter().skip(scroll_offset).take(list_height).enumerate() {
                 let is_selected = scroll_offset + row == selected;
-                let width = chunks[1].width as usize;
+                let width = inner.width as usize;
                 let (text, base) = match item {
                     FileItem::Parent => ("../".to_string(), Color::Yellow),
                     FileItem::Dir(p) => (format!("{}/", name_of(p)), Color::Yellow),
@@ -3180,9 +3203,9 @@ fn run_file_browser(
                     Style::default().fg(base)
                 };
                 let area = ratatui::layout::Rect {
-                    x: chunks[1].x,
-                    y: chunks[1].y + row as u16,
-                    width: chunks[1].width,
+                    x: inner.x,
+                    y: inner.y + row as u16,
+                    width: inner.width,
                     height: 1,
                 };
                 Paragraph::new(Span::styled(truncated, style))
