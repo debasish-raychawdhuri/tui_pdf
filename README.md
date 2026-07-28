@@ -54,7 +54,7 @@ Open any file from disk without leaving the viewer (`e`), or switch between open
 - **Virtual document tabs** — switch between previously opened documents while preserving scroll and zoom state (`Tab`)
 - **Named sessions** — save all open documents with scroll/zoom state to a named session (`S`), restore with `tui-pdf --session <name>`
 - **Portable sessions** — Zotero PDF paths are stored as portable `zotero://` URIs, so sessions synced via cloud storage work across computers
-- **reMarkable integration** — send the current PDF to a reMarkable tablet over SSH in Developer Mode, opened at your current page (`R`; falls back to the USB web interface for non-developer devices), or to the reMarkable cloud via [rmapi](https://github.com/ddvk/rmapi) (`C`). Bidirectionally sync every saved session's documents and reading positions with the tablet via `tui-pdf --sync-sessions`, which also pulls your handwritten annotations back and draws them over the PDF (`a` to toggle)
+- **reMarkable integration** — send the current PDF to a reMarkable tablet over SSH in Developer Mode, opened at your current page (`R`; falls back to the USB web interface for non-developer devices), or to the reMarkable cloud via [rmapi](https://github.com/ddvk/rmapi) (`C`). Bidirectionally sync every saved session's documents and reading positions with the tablet via `tui-pdf --sync-sessions`, which also pulls your handwritten annotations back and draws them over the PDF (`a` to toggle). For any other device, `tui-pdf --sync-session-to-directory <dir>` copies the same documents into a plain folder instead
 - **Shell completions** — tab completion for bash, fish, and zsh
 
 ## Requirements
@@ -164,6 +164,11 @@ tui-pdf --sync-sessions mysession othersession
 
 # Sync over WiFi instead of USB (needs SSH-over-WLAN enabled on the tablet):
 tui-pdf --sync-sessions --ip 192.168.1.42
+
+# Copy sessions' PDFs into any folder instead of a tablet (all, or only the
+# named ones) — one subfolder per session, files named by Zotero title:
+tui-pdf --sync-session-to-directory ~/tablet
+tui-pdf --sync-session-to-directory ~/tablet mysession othersession
 
 # Move session storage to a custom directory (e.g. for cloud sync):
 tui-pdf --move-sessions ~/MEGA/tui-pdf-sessions
@@ -294,6 +299,10 @@ tui-pdf --sync-sessions --ip 192.168.1.42
 ```
 
 `--ip` overrides `remarkable_host` from the config for that run; set `remarkable_host` in the config to make WiFi the default.
+
+### Sync sessions to a plain folder
+
+**`tui-pdf --sync-session-to-directory <dir> [name...]`** does the reMarkable session sync's file transfer against an ordinary directory — useful for a tablet that reads a cloud/WebDAV folder, a USB stick, or an e-reader mounted as storage. For each saved session (or only the ones you name) it creates `<dir>/<session>/` and copies the actual PDFs into it, named by Zotero title exactly as they'd be named on the tablet. Markdown documents and URLs are skipped, files already present are left untouched (so annotations made in the target folder survive), and nothing is ever deleted. A plain folder carries no reading position or stroke data, so unlike `--sync-sessions` this direction is one-way: no positions are reconciled and no annotations are pulled back.
 
 > The reMarkable's `xochitl` service is never stopped mid-sync — sidecar files are written live and the service is restarted only once at the end, which briefly blanks the screen.
 

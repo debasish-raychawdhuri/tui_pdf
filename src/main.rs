@@ -1046,6 +1046,93 @@ fn sync_sessions(only: &[String], host_override: Option<&str>) -> io::Result<()>
     Ok(())
 }
 
+/// Copy every saved session's documents into `<dir>/<session>/`, mirroring the
+/// layout `--sync-sessions` creates on the reMarkable: one folder per session,
+/// each PDF named by its Zotero title. Files already present are left untouched
+/// (so annotations made in the target folder survive) and nothing is deleted.
+/// Unlike the reMarkable sync there is no reading position or annotation to
+/// reconcile — a plain directory carries no such metadata — so this is one-way.
+fn sync_sessions_to_directory(dir: &str, only: &[String]) -> io::Result<()> {
+    let config = load_config();
+    let zotero_dir = config.zotero_dir.clone();
+
+    let root = std::path::Path::new(dir);
+    std::fs::create_dir_all(root)
+        .map_err(|e| io::Error::new(e.kind(), format!("cannot create {dir}: {e}")))?;
+
+    let mut sessions = list_sessions();
+    if !only.is_empty() {
+        // Restrict to the named sessions; fail loudly if any don't exist.
+        for name in only {
+            if !sessions.iter().any(|s| s == name) {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("session '{name}' not found"),
+                ));
+            }
+        }
+        sessions.retain(|s| only.iter().any(|n| n == s));
+    }
+    if sessions.is_empty() {
+        println!("No saved sessions to sync.");
+        return Ok(());
+    }
+    println!("Syncing to {}", root.display());
+
+    for name in &sessions {
+        let session = match load_session(name) {
+            Some(s) => s,
+            None => continue,
+        };
+        let folder = root.join(sanitize_name(name));
+        std::fs::create_dir_all(&folder)
+            .map_err(|e| io::Error::new(e.kind(), format!("cannot create {}: {e}", folder.display())))?;
+
+        let (mut copied, mut existing, mut skipped) = (0u32, 0u32, 0u32);
+        // Names claimed during this run, so two documents whose Zotero titles
+        // collide don't silently overwrite (or hide behind) each other.
+        let mut claimed: Vec<String> = Vec::new();
+
+        for doc in &session.docs {
+            if !is_syncable_pdf(&doc.path) {
+                continue;
+            }
+            let src = std::path::Path::new(&doc.path);
+            if !src.exists() {
+                skipped += 1;
+                continue;
+            }
+            let ext = src
+                .extension()
+                .map(|e| format!(".{}", e.to_string_lossy()))
+                .unwrap_or_else(|| ".pdf".to_string());
+            let stem = device_display_name(&doc.path, zotero_dir.as_deref());
+            let mut file_name = format!("{stem}{ext}");
+            let mut n = 2;
+            while claimed.iter().any(|c| c == &file_name) {
+                file_name = format!("{stem} ({n}){ext}");
+                n += 1;
+            }
+            claimed.push(file_name.clone());
+
+            let dest = folder.join(&file_name);
+            if dest.exists() {
+                existing += 1;
+                continue;
+            }
+            match std::fs::copy(src, &dest) {
+                Ok(_) => copied += 1,
+                Err(e) => {
+                    eprintln!("  warning: copying '{}' failed: {e}", src.display());
+                    skipped += 1;
+                }
+            }
+        }
+        println!("  {name}: copied {copied}, existing {existing}, skipped {skipped}");
+    }
+    Ok(())
+}
+
 /// Ask the terminal to delete all kitty images and free their data.
 /// Stripe protocols transmit image data once and never delete it, so protocols
 /// dropped on document switches and previews leak terminal memory until kitty
@@ -1169,6 +1256,10 @@ OPTIONS:
                                 Sync all sessions (or only the named ones) to/from
                                 a reMarkable. Defaults to USB (10.11.99.1); pass
                                 --ip <addr> to sync over WiFi
+    --sync-session-to-directory <dir> [name...]
+                                Copy all sessions (or only the named ones) into
+                                <dir>/<session>/, named by Zotero title. Existing
+                                files are left untouched; one-way, nothing deleted
     --zotero                    Browse Zotero library and open a PDF
     --setup-zotero <dir>        Configure Zotero data directory (one-time)
     --move-sessions <dir>       Move session storage to a custom directory
@@ -1212,7 +1303,7 @@ fn print_completions_bash() {
     COMPREPLY=()
     cur="${{COMP_WORDS[COMP_CWORD]}}"
     prev="${{COMP_WORDS[COMP_CWORD-1]}}"
-    opts="--help --session --list-sessions --sync-sessions --zotero --setup-zotero --move-sessions --forward --completions"
+    opts="--help --session --list-sessions --sync-sessions --sync-session-to-directory --zotero --setup-zotero --move-sessions --forward --completions"
 
     case "$prev" in
         --session)
@@ -1221,7 +1312,7 @@ fn print_completions_bash() {
             COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
             return 0
             ;;
-        --setup-zotero|--move-sessions)
+        --setup-zotero|--move-sessions|--sync-session-to-directory)
             COMPREPLY=( $(compgen -d -- "$cur") )
             return 0
             ;;
@@ -1231,8 +1322,9 @@ fn print_completions_bash() {
             ;;
     esac
 
-    # --sync-sessions takes one or more session names
-    if [[ " ${{COMP_WORDS[*]}} " == *" --sync-sessions "* && "$cur" != -* ]]; then
+    # --sync-sessions and --sync-session-to-directory take session names
+    if [[ (" ${{COMP_WORDS[*]}} " == *" --sync-sessions "* \
+        || " ${{COMP_WORDS[*]}} " == *" --sync-session-to-directory "*) && "$cur" != -* ]]; then
         local sessions
         sessions=$(tui-pdf --list-sessions 2>/dev/null | grep '^ ' | sed 's/^ *//' | cut -d' ' -f1)
         COMPREPLY=( $(compgen -W "$sessions" -- "$cur") )
@@ -1255,6 +1347,8 @@ complete -c tui-pdf -l session -x -d 'Restore a saved session' -a '(tui-pdf --li
 complete -c tui-pdf -l list-sessions -d 'List all saved sessions'
 complete -c tui-pdf -l sync-sessions -d 'Sync all sessions to/from a connected reMarkable'
 complete -c tui-pdf -n '__fish_seen_argument -l sync-sessions' -d 'Session to sync' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
+complete -c tui-pdf -l sync-session-to-directory -r -F -d 'Copy sessions into <dir>/<session>/'
+complete -c tui-pdf -n '__fish_seen_argument -l sync-session-to-directory' -d 'Session to copy' -a '(tui-pdf --list-sessions 2>/dev/null | string match -r "^  \S+" | string trim)'
 complete -c tui-pdf -l zotero -d 'Browse Zotero library'
 complete -c tui-pdf -l setup-zotero -r -F -d 'Configure Zotero data directory'
 complete -c tui-pdf -l move-sessions -r -F -d 'Move session storage directory'
@@ -1274,6 +1368,7 @@ _tui-pdf() {{
         '--session[Restore a saved session]:session name:->sessions' \
         '--list-sessions[List all saved sessions]' \
         '--sync-sessions[Sync all sessions to/from a connected reMarkable]:*:session name:->sessions' \
+        '--sync-session-to-directory[Copy sessions into <dir>/<session>/]:directory:_directories:*:session name:->sessions' \
         '--zotero[Browse Zotero library]' \
         '--setup-zotero[Configure Zotero data directory]:directory:_directories' \
         '--move-sessions[Move session storage directory]:directory:_directories' \
@@ -1438,6 +1533,27 @@ fn main() -> io::Result<()> {
             }
         }
         match sync_sessions(&only, host_override.as_deref()) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("sync failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Handle --sync-session-to-directory <dir> [name...]: copy all saved
+    // sessions, or only the named ones, into <dir>/<session>/. Same document
+    // selection and naming as --sync-sessions, but into a plain folder.
+    if args[1] == "--sync-session-to-directory" || args[1] == "--sync-sessions-to-directory" {
+        let dir = match args.get(2) {
+            Some(d) if !d.starts_with('-') => d.clone(),
+            _ => {
+                eprintln!("{} requires a target directory, e.g. {} ~/tablet", args[1], args[1]);
+                std::process::exit(1);
+            }
+        };
+        let only: Vec<String> = args[3..].to_vec();
+        match sync_sessions_to_directory(&dir, &only) {
             Ok(()) => std::process::exit(0),
             Err(e) => {
                 eprintln!("sync failed: {e}");
